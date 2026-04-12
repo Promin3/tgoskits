@@ -165,6 +165,9 @@ members = [
     "test-suit/arceos/rust/task/tls",
     "test-suit/arceos/rust/task/wait_queue",
     "test-suit/arceos/rust/task/yield",
+    "test-suit/axvisor/common/guestlib",
+    "test-suit/axvisor/example/fail-report",
+    "test-suit/axvisor/example/pass-report",
     "xtask",
 ]
 
