@@ -25,7 +25,6 @@ use crate::{
             session,
         },
         context::AxvisorContext,
-        qemu,
     },
     context::{AppContext, AxvisorCliArgs},
 };
@@ -202,8 +201,7 @@ pub(super) async fn run(
     let runtime = resolve_runtime_artifact_path(&built)
         .context("AxVisor host build finished without runtime artifact")?;
     let runtime = runtime.to_path_buf();
-    let qemu_config_path =
-        qemu::default_qemu_config_template_path(&request.axvisor_dir, &request.arch);
+    let qemu_config_path = default_qemu_config_template_path(&request.axvisor_dir, &request.arch);
     let (records, host_log) = match plan.host_session_mode {
         HostSessionMode::Shared => run_with_shared_host_session(
             plan,
@@ -826,6 +824,10 @@ fn load_qemu_args(
     }
     let _ = config.to_bin;
     Ok(args)
+}
+
+fn default_qemu_config_template_path(axvisor_dir: &Path, arch: &str) -> PathBuf {
+    axvisor_dir.join(format!("scripts/ostool/qemu-{arch}.toml"))
 }
 
 fn apply_host_dtb_override(args: &mut Vec<String>, host_dtb: &Path) {
