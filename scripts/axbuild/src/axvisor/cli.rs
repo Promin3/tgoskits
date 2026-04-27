@@ -183,9 +183,6 @@ pub struct ArgsTestCases {
     #[arg(long, value_name = "CASE_DIR")]
     pub case: Option<PathBuf>,
 
-    #[arg(long, value_name = "DTB")]
-    pub host_dtb: Option<PathBuf>,
-
     #[arg(long, value_name = "BOOL", num_args = 1)]
     pub guest_log: Option<bool>,
 
@@ -446,8 +443,6 @@ mod tests {
             "aarch64",
             "--suite",
             "test-suit/axvisor/suites/examples.toml",
-            "--host-dtb",
-            "test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb",
             "--guest-log",
             "false",
         ])
@@ -462,12 +457,6 @@ mod tests {
                         Some(PathBuf::from("test-suit/axvisor/suites/examples.toml"))
                     );
                     assert_eq!(args.case, None);
-                    assert_eq!(
-                        args.host_dtb,
-                        Some(PathBuf::from(
-                            "test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb"
-                        ))
-                    );
                     assert_eq!(args.guest_log, Some(false));
                     assert!(!args.fresh_host);
                 }
@@ -505,7 +494,6 @@ mod tests {
                         Some(PathBuf::from("test-suit/axvisor/example/pass-report"))
                     );
                     assert_eq!(args.suite, None);
-                    assert_eq!(args.host_dtb, None);
                     assert_eq!(args.guest_log, None);
                     assert!(!args.fresh_host);
                 }

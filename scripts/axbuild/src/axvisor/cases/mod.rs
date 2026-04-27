@@ -39,7 +39,6 @@ pub(super) struct CasePlan {
     pub(super) arch: String,
     pub(super) guest_log: bool,
     pub(super) host_session_mode: HostSessionMode,
-    pub(super) host_dtb: Option<PathBuf>,
     pub(super) selection: Selection,
     pub(super) suite_name: Option<String>,
     pub(super) cases: Vec<manifest::LoadedCase>,
@@ -164,15 +163,6 @@ impl CasePlan {
         } else {
             HostSessionMode::Shared
         };
-        let host_dtb = args
-            .host_dtb
-            .as_ref()
-            .map(|path| resolve_cli_path(workspace_root, path));
-        if let Some(host_dtb) = &host_dtb
-            && !host_dtb.is_file()
-        {
-            bail!("host DTB does not exist: {}", host_dtb.display());
-        }
 
         let (suite_name, cases) = match &selection {
             Selection::Suite(path) => {
@@ -194,7 +184,6 @@ impl CasePlan {
             arch,
             guest_log,
             host_session_mode,
-            host_dtb,
             selection,
             suite_name,
             cases,
@@ -207,10 +196,6 @@ impl CasePlan {
             arch: &self.arch,
             guest_log: self.guest_log,
             host_session_mode: self.host_session_mode,
-            host_dtb: self
-                .host_dtb
-                .as_ref()
-                .map(|path| path.display().to_string()),
             run_dir: artifacts.run_dir.display().to_string(),
             target_rootfs: artifacts.target_rootfs.display().to_string(),
             selection: SummarySelectionRecord {
@@ -287,13 +272,6 @@ fn print_plan_overview(plan: &CasePlan) {
     print_kv("arch", &plan.arch);
     print_kv("guest_log", plan.guest_log);
     print_kv("session_mode", plan.host_session_mode.label());
-    print_kv(
-        "host_dtb",
-        plan.host_dtb
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<default>".to_string()),
-    );
     print_kv("cases", plan.cases.len());
 }
 
@@ -332,7 +310,6 @@ struct SummaryRecord<'a> {
     arch: &'a str,
     guest_log: bool,
     host_session_mode: HostSessionMode,
-    host_dtb: Option<String>,
     run_dir: String,
     target_rootfs: String,
     selection: SummarySelectionRecord<'a>,
@@ -368,7 +345,6 @@ timeout_secs = 5
             arch: "aarch64".to_string(),
             suite: None,
             case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
-            host_dtb: None,
             guest_log: None,
             fresh_host: false,
         };
@@ -412,7 +388,6 @@ cases = ["example/pass-report"]
             arch: "aarch64".to_string(),
             suite: Some(PathBuf::from("test-suit/axvisor/suites/examples.toml")),
             case: None,
-            host_dtb: None,
             guest_log: None,
             fresh_host: false,
         };
@@ -422,43 +397,6 @@ cases = ["example/pass-report"]
         assert_eq!(plan.host_session_mode, HostSessionMode::Shared);
         assert_eq!(plan.suite_name.as_deref(), Some("examples"));
         assert_eq!(plan.cases.len(), 1);
-    }
-
-    #[test]
-    fn case_plan_resolves_host_dtb_against_workspace_root() {
-        let dir = tempdir().unwrap();
-        let workspace_root = dir.path();
-        let case_dir = workspace_root.join("test-suit/axvisor/example/pass-report");
-        fs::create_dir_all(&case_dir).unwrap();
-        fs::write(
-            case_dir.join("case.toml"),
-            r#"
-id = "example.pass"
-arch = ["riscv64"]
-timeout_secs = 5
-"#,
-        )
-        .unwrap();
-
-        let args = ArgsTestCases {
-            arch: "riscv64".to_string(),
-            suite: None,
-            case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
-            host_dtb: Some(PathBuf::from(
-                "test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb",
-            )),
-            guest_log: None,
-            fresh_host: false,
-        };
-
-        let plan = CasePlan::from_args(args, workspace_root).unwrap();
-        assert_eq!(
-            plan.host_dtb,
-            Some(
-                workspace_root
-                    .join("test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb")
-            )
-        );
     }
 
     #[test]
@@ -481,7 +419,6 @@ timeout_secs = 5
             arch: "aarch64".to_string(),
             suite: None,
             case: Some(PathBuf::from("test-suit/axvisor/example/pass-report")),
-            host_dtb: None,
             guest_log: None,
             fresh_host: true,
         };
@@ -496,7 +433,6 @@ timeout_secs = 5
             arch: "aarch64".to_string(),
             guest_log: false,
             host_session_mode: HostSessionMode::FreshPerCase,
-            host_dtb: Some(PathBuf::from("/tmp/host.dtb")),
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,
             cases: vec![manifest::LoadedCase {
@@ -537,10 +473,6 @@ timeout_secs = 5
         assert_eq!(
             summary["host_session_mode"],
             Value::String("fresh_per_case".to_string())
-        );
-        assert_eq!(
-            summary["host_dtb"],
-            Value::String("/tmp/host.dtb".to_string())
         );
     }
 }

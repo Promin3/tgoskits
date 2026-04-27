@@ -19,11 +19,6 @@ cargo axvisor test cases --arch aarch64 --suite test-suit/axvisor/suites/example
 
 # 控制是否实时打印 guest 串口输出
 cargo axvisor test cases --case test-suit/axvisor/example/pass-report --guest-log true
-
-# RISC-V host 如需固定 cold boot hart，可显式传入 host DTB
-cargo axvisor test cases --arch riscv64 \
-  --suite test-suit/axvisor/suites/examples.toml \
-  --host-dtb test-suit/axvisor/config/riscv64-host-qemu-coldboot-hart0.dtb
 ```
 
 说明：
@@ -33,7 +28,6 @@ cargo axvisor test cases --arch riscv64 \
 - 单 case 默认显示 guest 串口输出；suite 默认不显示。
 - 默认执行模式为共享 host：runner 会尽量复用同一个 AxVisor/QEMU host 会话串行跑完整个 suite。
 - `--fresh-host` 可切换到“每个 case 一个 host”模式：每跑完一个 case 就销毁当前 AxVisor/QEMU host，再为下一个 case 重新启动新的 host。
-- `--host-dtb` 可覆盖 host QEMU 使用的 DTB；当前主要用于 RISC-V host 固定 cold boot hart。
 - runner 输出位于 `target/<target>/axvisor-cases/<run-id>/`。
 
 ## 测例设计规范

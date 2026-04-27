@@ -246,7 +246,6 @@ fn run_with_shared_host_session(
         runtime,
         qemu_config_path,
         rootfs,
-        plan.host_dtb.as_deref(),
         plan.guest_log,
     )?);
 
@@ -295,7 +294,6 @@ fn run_with_shared_host_session(
                             runtime,
                             qemu_config_path,
                             rootfs,
-                            plan.host_dtb.as_deref(),
                             plan.guest_log,
                         )
                         .with_context(|| {
@@ -332,7 +330,6 @@ fn run_with_fresh_host_per_case(
             runtime,
             qemu_config_path,
             rootfs,
-            plan.host_dtb.as_deref(),
             plan.guest_log,
         )
         .with_context(|| {
@@ -694,13 +691,12 @@ fn spawn_target_session(
     runtime: &Path,
     qemu_config_path: &Path,
     rootfs: &Path,
-    host_dtb: Option<&Path>,
     guest_log: bool,
 ) -> anyhow::Result<QemuSession> {
     let mut session = QemuSession::spawn(
         arch,
         runtime,
-        load_qemu_args(qemu_config_path, Some(rootfs), host_dtb)?,
+        load_qemu_args(qemu_config_path, Some(rootfs))?,
         guest_log,
     )
     .with_context(|| format!("failed to launch AxVisor host QEMU for arch `{arch}`"))?;
@@ -799,11 +795,7 @@ fn ansi_escape_regex() -> &'static Regex {
     REGEX.get_or_init(|| Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap())
 }
 
-fn load_qemu_args(
-    path: &Path,
-    rootfs_override: Option<&Path>,
-    host_dtb: Option<&Path>,
-) -> anyhow::Result<Vec<String>> {
+fn load_qemu_args(path: &Path, rootfs_override: Option<&Path>) -> anyhow::Result<Vec<String>> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let config: QemuConfigFile =
@@ -819,30 +811,12 @@ fn load_qemu_args(
     if let Some(rootfs) = rootfs_override {
         apply_rootfs_override(&mut args, rootfs)?;
     }
-    if let Some(host_dtb) = host_dtb {
-        apply_host_dtb_override(&mut args, host_dtb);
-    }
     let _ = config.to_bin;
     Ok(args)
 }
 
 fn default_qemu_config_template_path(axvisor_dir: &Path, arch: &str) -> PathBuf {
     axvisor_dir.join(format!("scripts/ostool/qemu-{arch}.toml"))
-}
-
-fn apply_host_dtb_override(args: &mut Vec<String>, host_dtb: &Path) {
-    let replacement = host_dtb.display().to_string();
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "-dtb" && index + 1 < args.len() {
-            args[index + 1] = replacement;
-            return;
-        }
-        index += 1;
-    }
-
-    args.push("-dtb".to_string());
-    args.push(replacement);
 }
 
 fn apply_rootfs_override(args: &mut Vec<String>, rootfs: &Path) -> anyhow::Result<()> {
@@ -1273,45 +1247,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_host_dtb_override_replaces_existing_dtb() {
-        let mut args = vec![
-            "-machine".to_string(),
-            "virt".to_string(),
-            "-dtb".to_string(),
-            "/tmp/original.dtb".to_string(),
-        ];
-
-        apply_host_dtb_override(&mut args, Path::new("/tmp/override.dtb"));
-
-        assert_eq!(
-            args,
-            vec![
-                "-machine".to_string(),
-                "virt".to_string(),
-                "-dtb".to_string(),
-                "/tmp/override.dtb".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn apply_host_dtb_override_appends_when_missing() {
-        let mut args = vec!["-machine".to_string(), "virt".to_string()];
-
-        apply_host_dtb_override(&mut args, Path::new("/tmp/override.dtb"));
-
-        assert_eq!(
-            args,
-            vec![
-                "-machine".to_string(),
-                "virt".to_string(),
-                "-dtb".to_string(),
-                "/tmp/override.dtb".to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn write_cases_axvisor_build_config_enables_fs_and_clears_vm_configs() {
         let dir = tempdir().unwrap();
         let workspace_root = dir.path().join("workspace");
@@ -1347,7 +1282,6 @@ vm_configs = ["vm.toml"]
             arch: "aarch64".to_string(),
             guest_log: false,
             host_session_mode: HostSessionMode::Shared,
-            host_dtb: None,
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,
             cases: vec![crate::axvisor::cases::manifest::LoadedCase {

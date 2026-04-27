@@ -85,7 +85,6 @@ mod tests {
             arch: "aarch64".to_string(),
             guest_log: true,
             host_session_mode: HostSessionMode::Shared,
-            host_dtb: None,
             selection: Selection::Case(PathBuf::from("/tmp/case")),
             suite_name: None,
             cases: vec![LoadedCase {
