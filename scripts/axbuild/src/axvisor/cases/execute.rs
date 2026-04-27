@@ -325,19 +325,14 @@ fn run_with_fresh_host_per_case(
     let mut host_log = String::new();
 
     for (case, prepared) in plan.cases.iter().zip(prepared_cases) {
-        let mut session = spawn_target_session(
-            arch,
-            runtime,
-            qemu_config_path,
-            rootfs,
-            plan.guest_log,
-        )
-        .with_context(|| {
-            format!(
-                "failed to launch AxVisor host for case `{}`",
-                case.manifest.id
-            )
-        })?;
+        let mut session =
+            spawn_target_session(arch, runtime, qemu_config_path, rootfs, plan.guest_log)
+                .with_context(|| {
+                    format!(
+                        "failed to launch AxVisor host for case `{}`",
+                        case.manifest.id
+                    )
+                })?;
 
         let (record, action) = run_target_case(case, prepared, &mut session)?;
         let note = match action {

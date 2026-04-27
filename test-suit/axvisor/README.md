@@ -5,6 +5,9 @@
 ```bash
 cd tgoskits
 
+# 自动发现并运行指定架构的测例（不指定时默认架构为 aarch64）
+cargo axvisor test cases --arch riscv64
+
 # 运行单个测例
 cargo axvisor test cases --case test-suit/axvisor/example/pass-report
 
@@ -23,9 +26,10 @@ cargo axvisor test cases --case test-suit/axvisor/example/pass-report --guest-lo
 
 说明：
 
-- `--case` 与 `--suite` 互斥，必须二选一。
+- 不指定 `--case` 与 `--suite` 时，runner 会自动扫描 `test-suit/axvisor` 下支持当前架构的测例。
+- `--case` 与 `--suite` 互斥。
 - 不显式指定 `--arch` 时默认使用 `aarch64`。
-- 单 case 默认显示 guest 串口输出；suite 默认不显示。
+- 单 case 默认显示 guest 串口输出；suite 和自动发现模式默认不显示。
 - 默认执行模式为共享 host：runner 会尽量复用同一个 AxVisor/QEMU host 会话串行跑完整个 suite。
 - `--fresh-host` 可切换到“每个 case 一个 host”模式：每跑完一个 case 就销毁当前 AxVisor/QEMU host，再为下一个 case 重新启动新的 host。
 - runner 输出位于 `target/<target>/axvisor-cases/<run-id>/`。
@@ -44,6 +48,12 @@ test-suit/axvisor/<category>/<case>/
 └── vm/
     └── <arch>.toml.in
 ```
+
+默认自动发现模式会递归查找包含 `case.toml` 的目录，并仅选择同时满足以下条件的测例：
+
+- `case.toml` 的 `arch` 列表包含当前 `--arch`。
+- 存在对应的 `vm/<arch>.toml.in`。
+- 不位于 `common`、`example`、`suites` 或隐藏目录下。
 
 各文件作用：
 

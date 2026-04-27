@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 pub(crate) const AXVISOR_TEST_SUITE_ROOT: &str = "test-suit/axvisor";
 const CASE_MANIFEST_FILE: &str = "case.toml";
+const VM_TEMPLATE_DIR: &str = "vm";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedCase {
@@ -76,6 +77,90 @@ pub(crate) fn load_case_from_dir(case_dir: &Path) -> anyhow::Result<LoadedCase> 
         case_dir: case_dir.to_path_buf(),
         manifest,
     })
+}
+
+pub(crate) fn discover_cases(root: &Path, arch: &str) -> anyhow::Result<Vec<LoadedCase>> {
+    if !root.is_dir() {
+        bail!("case discovery root does not exist: {}", root.display());
+    }
+
+    let mut cases = Vec::new();
+    discover_cases_in_dir(root, arch, &mut cases)?;
+    cases.sort_by(|left, right| {
+        left.manifest
+            .id
+            .cmp(&right.manifest.id)
+            .then_with(|| left.case_dir.cmp(&right.case_dir))
+    });
+
+    if cases.is_empty() {
+        bail!(
+            "no axvisor cases supporting arch `{arch}` were found under {}",
+            root.display()
+        );
+    }
+
+    Ok(cases)
+}
+
+fn discover_cases_in_dir(
+    dir: &Path,
+    arch: &str,
+    cases: &mut Vec<LoadedCase>,
+) -> anyhow::Result<()> {
+    if should_skip_discovery_dir(dir) {
+        return Ok(());
+    }
+
+    let manifest_path = dir.join(CASE_MANIFEST_FILE);
+    if manifest_path.is_file() {
+        let case = load_case_from_dir(dir)
+            .with_context(|| format!("failed to load discovered case at {}", dir.display()))?;
+        if case.manifest.arch.iter().any(|value| value == arch) {
+            ensure_vm_template_exists(&case, arch)?;
+            cases.push(case);
+        }
+        return Ok(());
+    }
+
+    let mut children = fs::read_dir(dir)
+        .with_context(|| format!("failed to read discovery directory {}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to read entry under {}", dir.display()))?;
+    children.sort_by_key(|entry| entry.path());
+
+    for entry in children {
+        let path = entry.path();
+        if path.is_dir() {
+            discover_cases_in_dir(&path, arch, cases)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_discovery_dir(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    name.starts_with('.') || matches!(name, "common" | "example" | "suites")
+}
+
+fn ensure_vm_template_exists(case: &LoadedCase, arch: &str) -> anyhow::Result<()> {
+    let template = case
+        .case_dir
+        .join(VM_TEMPLATE_DIR)
+        .join(format!("{arch}.toml.in"));
+    if template.is_file() {
+        Ok(())
+    } else {
+        bail!(
+            "case `{}` supports arch `{arch}` but VM template is missing: {}",
+            case.manifest.id,
+            template.display()
+        )
+    }
 }
 
 fn load_suite_manifest(path: &Path) -> anyhow::Result<SuiteManifest> {
@@ -218,5 +303,123 @@ cases = ["example/pass-report"]
         assert_eq!(suite.name, "examples");
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].manifest.id, "example.pass");
+    }
+
+    #[test]
+    fn discover_cases_finds_supported_cases_and_skips_unsupported_arch() {
+        let dir = tempdir().unwrap();
+        let suite_root = dir.path().join(AXVISOR_TEST_SUITE_ROOT);
+
+        let pass_dir = suite_root.join("cpu/pass-report");
+        fs::create_dir_all(pass_dir.join("vm")).unwrap();
+        fs::write(
+            pass_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "example.pass"
+arch = ["aarch64", "riscv64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(pass_dir.join("vm/aarch64.toml.in"), "").unwrap();
+
+        let skip_dir = suite_root.join("cpu/riscv-only");
+        fs::create_dir_all(skip_dir.join("vm")).unwrap();
+        fs::write(
+            skip_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "example.riscv"
+arch = ["riscv64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(skip_dir.join("vm/riscv64.toml.in"), "").unwrap();
+
+        let discovered = discover_cases(&suite_root, "aarch64").unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].manifest.id, "example.pass");
+    }
+
+    #[test]
+    fn discover_cases_rejects_supported_case_without_vm_template() {
+        let dir = tempdir().unwrap();
+        let suite_root = dir.path().join(AXVISOR_TEST_SUITE_ROOT);
+        let case_dir = suite_root.join("cpu/pass-report");
+        fs::create_dir_all(&case_dir).unwrap();
+        fs::write(
+            case_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "example.pass"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+
+        let err = discover_cases(&suite_root, "aarch64").unwrap_err();
+        assert!(err.to_string().contains("VM template is missing"));
+    }
+
+    #[test]
+    fn discover_cases_skips_helper_directories() {
+        let dir = tempdir().unwrap();
+        let suite_root = dir.path().join(AXVISOR_TEST_SUITE_ROOT);
+
+        let common_case_dir = suite_root.join("common/helper");
+        fs::create_dir_all(common_case_dir.join("vm")).unwrap();
+        fs::write(
+            common_case_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "common.helper"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(common_case_dir.join("vm/aarch64.toml.in"), "").unwrap();
+
+        let suite_case_dir = suite_root.join("suites/example");
+        fs::create_dir_all(suite_case_dir.join("vm")).unwrap();
+        fs::write(
+            suite_case_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "suite.helper"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(suite_case_dir.join("vm/aarch64.toml.in"), "").unwrap();
+
+        let example_case_dir = suite_root.join("example/pass-report");
+        fs::create_dir_all(example_case_dir.join("vm")).unwrap();
+        fs::write(
+            example_case_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "example.pass"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(example_case_dir.join("vm/aarch64.toml.in"), "").unwrap();
+
+        let real_case_dir = suite_root.join("cpu/pass-report");
+        fs::create_dir_all(real_case_dir.join("vm")).unwrap();
+        fs::write(
+            real_case_dir.join(CASE_MANIFEST_FILE),
+            r#"
+id = "cpu.pass"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(real_case_dir.join("vm/aarch64.toml.in"), "").unwrap();
+
+        let discovered = discover_cases(&suite_root, "aarch64").unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].manifest.id, "cpu.pass");
     }
 }

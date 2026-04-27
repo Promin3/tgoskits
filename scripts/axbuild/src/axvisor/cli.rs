@@ -170,7 +170,6 @@ pub struct ArgsTestBoard {
 #[derive(Args, Debug, Clone)]
 #[command(group(
     ArgGroup::new("selection")
-        .required(true)
         .args(["suite", "case"])
 ))]
 pub struct ArgsTestCases {
@@ -571,14 +570,38 @@ mod tests {
     }
 
     #[test]
-    fn command_rejects_test_cases_without_case_or_suite() {
+    fn command_parses_test_cases_auto_discovery() {
         #[derive(clap::Parser)]
         struct Cli {
             #[command(subcommand)]
             command: Command,
         }
 
-        assert!(Cli::try_parse_from(["axvisor", "test", "cases"]).is_err());
+        let cli = Cli::try_parse_from([
+            "axvisor",
+            "test",
+            "cases",
+            "--arch",
+            "riscv64",
+            "--guest-log",
+            "true",
+            "--fresh-host",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Test(args) => match args.command {
+                TestCommand::Cases(args) => {
+                    assert_eq!(args.arch, "riscv64");
+                    assert_eq!(args.suite, None);
+                    assert_eq!(args.case, None);
+                    assert_eq!(args.guest_log, Some(true));
+                    assert!(args.fresh_host);
+                }
+                _ => panic!("expected cases test command"),
+            },
+            _ => panic!("expected test command"),
+        }
     }
 
     #[test]

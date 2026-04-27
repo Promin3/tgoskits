@@ -24,6 +24,7 @@ const SUB_KV_LABEL_WIDTH: usize = 14;
 pub(super) enum Selection {
     Suite(PathBuf),
     Case(PathBuf),
+    Discover(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +153,7 @@ impl CasePlan {
         } else if let Some(path) = args.case {
             Selection::Case(resolve_cli_path(workspace_root, &path))
         } else {
-            unreachable!("clap ensures either --suite or --case is present");
+            Selection::Discover(workspace_root.join(manifest::AXVISOR_TEST_SUITE_ROOT))
         };
 
         let guest_log = args
@@ -178,6 +179,11 @@ impl CasePlan {
                 manifest::ensure_case_supports_arch(&case, &arch)?;
                 vec![case]
             }),
+            Selection::Discover(path) => {
+                let cases = manifest::discover_cases(path, &arch)
+                    .with_context(|| format!("failed to discover cases from {}", path.display()))?;
+                (None, cases)
+            }
         };
 
         Ok(Self {
@@ -268,6 +274,10 @@ fn print_plan_overview(plan: &CasePlan) {
             print_kv("selection", "case");
             print_kv("case_dir", path.display());
         }
+        Selection::Discover(path) => {
+            print_kv("selection", "discover");
+            print_kv("root", path.display());
+        }
     }
     print_kv("arch", &plan.arch);
     print_kv("guest_log", plan.guest_log);
@@ -280,12 +290,13 @@ impl Selection {
         match self {
             Self::Suite(_) => "suite",
             Self::Case(_) => "case",
+            Self::Discover(_) => "discover",
         }
     }
 
     fn path(&self) -> &Path {
         match self {
-            Self::Suite(path) | Self::Case(path) => path.as_path(),
+            Self::Suite(path) | Self::Case(path) | Self::Discover(path) => path.as_path(),
         }
     }
 }
@@ -425,6 +436,41 @@ timeout_secs = 5
 
         let plan = CasePlan::from_args(args, workspace_root).unwrap();
         assert_eq!(plan.host_session_mode, HostSessionMode::FreshPerCase);
+    }
+
+    #[test]
+    fn case_plan_defaults_to_discovery_when_no_selector_is_given() {
+        let dir = tempdir().unwrap();
+        let workspace_root = dir.path();
+        let case_dir = workspace_root.join("test-suit/axvisor/cpu/pass-report");
+        fs::create_dir_all(case_dir.join("vm")).unwrap();
+        fs::write(
+            case_dir.join("case.toml"),
+            r#"
+id = "cpu.pass"
+arch = ["aarch64"]
+timeout_secs = 5
+"#,
+        )
+        .unwrap();
+        fs::write(case_dir.join("vm/aarch64.toml.in"), "").unwrap();
+
+        let args = ArgsTestCases {
+            arch: "aarch64".to_string(),
+            suite: None,
+            case: None,
+            guest_log: None,
+            fresh_host: false,
+        };
+
+        let plan = CasePlan::from_args(args, workspace_root).unwrap();
+        assert!(!plan.guest_log);
+        assert_eq!(
+            plan.selection,
+            Selection::Discover(workspace_root.join("test-suit/axvisor"))
+        );
+        assert_eq!(plan.cases.len(), 1);
+        assert_eq!(plan.cases[0].manifest.id, "cpu.pass");
     }
 
     #[test]
