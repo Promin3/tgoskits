@@ -44,10 +44,9 @@ const QEMU_EXIT_MAGIC: u64 = 0x2000;
 const IA32_UMWAIT_CONTROL: u32 = 0xe1;
 const DEFAULT_ASID: u32 = 1;
 const X2APIC_MSR_BASE: u32 = 0x800;
-const X2APIC_MSR_END: u32 = 0x8ff;
+const X2APIC_MSR_END: u32 = 0x83f;
 
-/// A VMCB-backed SVM vCPU. The first two fields are reserved for the VMRUN
-/// assembly path implemented in the next stage.
+/// A VMCB-backed SVM vCPU. The first fields are part of the VMRUN assembly ABI.
 #[repr(C)]
 pub struct SvmVcpu {
     guest_regs: GeneralRegisters,
@@ -181,7 +180,7 @@ impl SvmVcpu {
         self.msrpm.set_write_intercept(IA32_UMWAIT_CONTROL, true)?;
         self.msrpm.set_read_intercept(IA32_UMWAIT_CONTROL, true)?;
 
-        for msr in 0x800..=0x83f {
+        for msr in X2APIC_MSR_BASE..=X2APIC_MSR_END {
             self.msrpm.set_read_intercept(msr, true)?;
             self.msrpm.set_write_intercept(msr, true)?;
         }
@@ -212,11 +211,7 @@ impl SvmVcpu {
     }
 
     /// Execute one raw `VMRUN` round without VMEXIT handling.
-    ///
-    /// Stage seven will replace the public `run()` placeholder with full pending-event
-    /// injection and VMEXIT dispatch. This helper keeps stage six focused on the register and
-    /// stack transition itself.
-    pub unsafe fn raw_vmrun(&mut self) {
+    unsafe fn raw_vmrun(&mut self) {
         self.vmcb.vmcb_mut().save.rax = self.guest_regs.rax;
         unsafe { self.vmrun() };
         self.guest_regs.rax = self.vmcb.vmcb().save.rax;
@@ -266,13 +261,20 @@ impl SvmVcpu {
     }
 
     fn advance_rip(&mut self, fallback_len: u64) -> AxResult {
-        let control = &self.vmcb.vmcb().control;
-        let next_rip = control.next_rip;
-        let rip = &mut self.vmcb.vmcb_mut().save.rip;
+        self.set_next_rip(self.vmcb.vmcb().control.next_rip, fallback_len)
+    }
+
+    fn advance_rip_with(&mut self, next_rip: u64, fallback_len: u64) -> AxResult {
+        self.set_next_rip(next_rip, fallback_len)
+    }
+
+    fn set_next_rip(&mut self, next_rip: u64, fallback_len: u64) -> AxResult {
+        let save = &mut self.vmcb.vmcb_mut().save;
         if next_rip != 0 {
-            *rip = next_rip;
+            save.rip = next_rip;
         } else {
-            *rip = rip
+            save.rip = save
+                .rip
                 .checked_add(fallback_len)
                 .ok_or_else(|| ax_err_type!(BadState, "SVM guest RIP overflow"))?;
         }
@@ -394,12 +396,19 @@ impl SvmVcpu {
     }
 
     fn io_exit_info(exit_info: &SvmExitInfo) -> SvmIoExitInfoDecoded {
+        let access_size = match exit_info.exitinfo1.get_bits(4..7) {
+            0b001 => 1,
+            0b010 => 2,
+            0b100 => 4,
+            _ => 0,
+        };
         SvmIoExitInfoDecoded {
-            access_size: exit_info.exitinfo1.get_bits(0..3) as u8,
-            is_string: exit_info.exitinfo1.get_bit(3),
-            is_repeat: exit_info.exitinfo1.get_bit(4),
-            is_in: exit_info.exitinfo1.get_bit(5),
+            access_size,
+            is_in: exit_info.exitinfo1.get_bit(0),
+            is_string: exit_info.exitinfo1.get_bit(2),
+            is_repeat: exit_info.exitinfo1.get_bit(3),
             port: exit_info.exitinfo1.get_bits(16..32) as u16,
+            next_rip: exit_info.exitinfo2,
         }
     }
 
@@ -436,6 +445,7 @@ struct SvmIoExitInfoDecoded {
     is_in: bool,
     is_string: bool,
     is_repeat: bool,
+    next_rip: u64,
 }
 
 impl AxArchVCpu for SvmVcpu {
@@ -490,7 +500,7 @@ impl AxArchVCpu for SvmVcpu {
             }
             SvmExitCode::IOIO => {
                 let io_info = Self::io_exit_info(&exit_info);
-                self.advance_rip(0)?;
+                self.advance_rip_with(io_info.next_rip, 0)?;
 
                 if io_info.is_repeat || io_info.is_string {
                     log::warn!("SVM unsupported IO-Exit: {io_info:#x?} of {exit_info:#x?}");
@@ -576,6 +586,7 @@ impl AxArchVCpu for SvmVcpu {
 
     fn set_return_value(&mut self, val: usize) {
         self.guest_regs.rax = val as u64;
+        self.vmcb.vmcb_mut().save.rax = val as u64;
     }
 }
 
@@ -830,8 +841,8 @@ mod tests {
         let exit_info = SvmExitInfo {
             exitcode_raw: SvmExitCode::IOIO.into(),
             exit_code: SvmExitCode::IOIO,
-            exitinfo1: 4 | (1 << 3) | (1 << 4) | (1 << 5) | (0x3f8 << 16),
-            exitinfo2: 0,
+            exitinfo1: 1 | (1 << 2) | (1 << 3) | (0b100 << 4) | (0x3f8 << 16),
+            exitinfo2: 0x401000,
             exitintinfo: 0,
             guest_rip: 0,
             next_rip: 0,
@@ -843,6 +854,26 @@ mod tests {
         assert!(io.is_repeat);
         assert!(io.is_in);
         assert_eq!(io.port, 0x3f8);
+        assert_eq!(io.next_rip, 0x401000);
+    }
+
+    #[test]
+    fn svm_npf_info_uses_exitinfo1_as_error_code_and_exitinfo2_as_gpa() {
+        let exit_info = SvmExitInfo {
+            exitcode_raw: SvmExitCode::NPF.into(),
+            exit_code: SvmExitCode::NPF,
+            exitinfo1: (1 << 1) | (1 << 4),
+            exitinfo2: 0xdead_beef,
+            exitintinfo: 0,
+            guest_rip: 0,
+            next_rip: 0,
+        };
+
+        let fault = SvmVcpu::nested_page_fault_info(&exit_info);
+        assert_eq!(fault.fault_guest_paddr, GuestPhysAddr::from(0xdead_beef));
+        assert!(fault.access_flags.contains(MappingFlags::WRITE));
+        assert!(fault.access_flags.contains(MappingFlags::EXECUTE));
+        assert!(!fault.access_flags.contains(MappingFlags::READ));
     }
 
     #[test]

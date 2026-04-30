@@ -20,12 +20,7 @@ mod vmcb;
 pub use cpuid::has_svm;
 pub use percpu::SvmPerCpuState;
 pub use vcpu::SvmVcpu;
-pub use vmcb::SvmExitInfo;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SvmExitReason {
-    Unsupported,
-}
+pub use vmcb::{SvmExitCode as SvmExitReason, SvmExitInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SvmInterruptInfo {
