@@ -515,6 +515,7 @@ pub enum SvmExitCode {
 /// SVM VMEXIT information captured from VMCB control fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SvmExitInfo {
+    pub exitcode_raw: u64,
     pub exit_code: SvmExitCode,
     pub exitinfo1: u64,
     pub exitinfo2: u64,
@@ -528,6 +529,7 @@ impl SvmExitInfo {
         let exit_code =
             SvmExitCode::try_from(vmcb.control.exitcode).unwrap_or(SvmExitCode::INVALID);
         Self {
+            exitcode_raw: vmcb.control.exitcode,
             exit_code,
             exitinfo1: vmcb.control.exitinfo1,
             exitinfo2: vmcb.control.exitinfo2,
@@ -630,6 +632,7 @@ mod tests {
 
         let info = SvmExitInfo::from_vmcb(&vmcb);
         assert_eq!(info.exit_code, SvmExitCode::NPF);
+        assert_eq!(info.exitcode_raw, SvmExitCode::NPF.into());
         assert_eq!(info.exitinfo1, 1);
         assert_eq!(info.exitinfo2, 0xdead_beef);
         assert_eq!(info.exitintinfo, 2);

@@ -17,26 +17,34 @@ use core::{arch::naked_asm, mem::size_of};
 
 use ax_errno::{AxResult, ax_err, ax_err_type};
 use ax_memory_addr::{MemoryAddr, PAGE_SIZE_4K as PAGE_SIZE};
-use axaddrspace::{GuestPhysAddr, HostPhysAddr};
+use axaddrspace::{
+    GuestPhysAddr, HostPhysAddr, MappingFlags, NestedPageFaultInfo,
+    device::{AccessWidth, Port, SysRegAddr, SysRegAddrRange},
+};
+use axdevice_base::BaseDeviceOps;
 use axvcpu::{AxArchVCpu, AxVCpuExitReason};
 use axvisor_api::{
     memory::{self, PhysFrame},
     vmm::{VCpuId, VMId},
 };
+use bit_field::BitField;
 use x86_64::registers::control::Cr0Flags;
 use x86_vlapic::EmulatedLocalApic;
 
 use super::vmcb::{
-    EventInj, InterceptException, InterceptInst1, InterceptInst2, NestedPageControl, Vmcb,
-    VmcbDescriptorTable, VmcbSegment,
+    EventInj, InterceptException, InterceptInst1, InterceptInst2, NestedPageControl, SvmExitCode,
+    SvmExitInfo, Vmcb, VmcbDescriptorTable, VmcbSegment,
 };
 #[cfg(not(test))]
 use crate::msr::Msr;
 use crate::regs::GeneralRegisters;
 
 const QEMU_EXIT_PORT: u16 = 0x604;
+const QEMU_EXIT_MAGIC: u64 = 0x2000;
 const IA32_UMWAIT_CONTROL: u32 = 0xe1;
 const DEFAULT_ASID: u32 = 1;
+const X2APIC_MSR_BASE: u32 = 0x800;
+const X2APIC_MSR_END: u32 = 0x8ff;
 
 /// A VMCB-backed SVM vCPU. The first two fields are reserved for the VMRUN
 /// assembly path implemented in the next stage.
@@ -214,6 +222,220 @@ impl SvmVcpu {
         self.guest_regs.rax = self.vmcb.vmcb().save.rax;
         self.launched = true;
     }
+
+    fn inner_run(&mut self) -> AxResult<Option<SvmExitInfo>> {
+        self.inject_pending_events();
+
+        unsafe { self.raw_vmrun() };
+
+        let exit_info = self.exit_info();
+        match self.vmexit_handler(&exit_info) {
+            Some(result) => {
+                result?;
+                Ok(None)
+            }
+            None => Ok(Some(exit_info)),
+        }
+    }
+
+    pub fn exit_info(&self) -> SvmExitInfo {
+        SvmExitInfo::from_vmcb(self.vmcb())
+    }
+
+    fn vmexit_handler(&mut self, exit_info: &SvmExitInfo) -> Option<AxResult> {
+        match exit_info.exit_code {
+            SvmExitCode::CPUID => Some(self.handle_cpuid()),
+            SvmExitCode::MSR
+                if (X2APIC_MSR_BASE..=X2APIC_MSR_END).contains(&(self.guest_regs.rcx as u32)) =>
+            {
+                Some(self.handle_apic_msr_access(Self::msr_exit_is_write(exit_info)))
+            }
+            SvmExitCode::NMI => Some(Ok(())),
+            _ => None,
+        }
+    }
+
+    fn inject_pending_events(&mut self) {
+        let control = &mut self.vmcb.vmcb_mut().control;
+        if control.eventinj & EventInj::VALID.bits() != 0 {
+            return;
+        }
+        if let Some(event) = self.pending_events.pop_front() {
+            control.eventinj = event.bits();
+        }
+    }
+
+    fn advance_rip(&mut self, fallback_len: u64) -> AxResult {
+        let control = &self.vmcb.vmcb().control;
+        let next_rip = control.next_rip;
+        let rip = &mut self.vmcb.vmcb_mut().save.rip;
+        if next_rip != 0 {
+            *rip = next_rip;
+        } else {
+            *rip = rip
+                .checked_add(fallback_len)
+                .ok_or_else(|| ax_err_type!(BadState, "SVM guest RIP overflow"))?;
+        }
+        Ok(())
+    }
+
+    fn handle_cpuid(&mut self) -> AxResult {
+        use raw_cpuid::{CpuIdResult, cpuid};
+
+        const VMEXIT_INSTR_LEN_CPUID: u64 = 2;
+        const LEAF_FEATURE_INFO: u32 = 0x1;
+        const LEAF_EXTENDED_FEATURE_INFO: u32 = 0x8000_0001;
+        const LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION: u32 = 0x7;
+        const LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION: u32 = 0xd;
+        const EAX_FREQUENCY_INFO: u32 = 0x16;
+        const LEAF_HYPERVISOR_INFO: u32 = 0x4000_0000;
+        const LEAF_HYPERVISOR_FEATURE: u32 = 0x4000_0001;
+        const VENDOR_STR: &[u8; 12] = b"RVMRVMRVMRVM";
+        let vendor_regs = unsafe { &*(VENDOR_STR.as_ptr() as *const [u32; 3]) };
+
+        let regs = self.guest_regs;
+        let function = regs.rax as u32;
+        let res = match function {
+            LEAF_FEATURE_INFO => {
+                const FEATURE_HYPERVISOR: u32 = 1 << 31;
+                const FEATURE_MCE: u32 = 1 << 7;
+                let mut res = cpuid!(regs.rax, regs.rcx);
+                res.ecx |= FEATURE_HYPERVISOR;
+                res.eax &= !FEATURE_MCE;
+                res
+            }
+            LEAF_EXTENDED_FEATURE_INFO => {
+                const FEATURE_SVM: u32 = 1 << 2;
+                let mut res = cpuid!(regs.rax, regs.rcx);
+                res.ecx &= !FEATURE_SVM;
+                res
+            }
+            LEAF_STRUCTURED_EXTENDED_FEATURE_FLAGS_ENUMERATION => {
+                let mut res = cpuid!(regs.rax, regs.rcx);
+                if regs.rcx == 0 {
+                    res.ecx.set_bit(5, false);
+                    res.ecx.set_bit(16, false);
+                }
+                res
+            }
+            LEAF_PROCESSOR_EXTENDED_STATE_ENUMERATION => cpuid!(regs.rax, regs.rcx),
+            LEAF_HYPERVISOR_INFO => CpuIdResult {
+                eax: LEAF_HYPERVISOR_FEATURE,
+                ebx: vendor_regs[0],
+                ecx: vendor_regs[1],
+                edx: vendor_regs[2],
+            },
+            LEAF_HYPERVISOR_FEATURE => CpuIdResult {
+                eax: 0,
+                ebx: 0,
+                ecx: 0,
+                edx: 0,
+            },
+            EAX_FREQUENCY_INFO => {
+                const TIMER_FREQUENCY_MHZ: u32 = 3_000;
+                let mut res = cpuid!(regs.rax, regs.rcx);
+                if res.eax == 0 {
+                    log::warn!(
+                        "handle_cpuid: Failed to get TSC frequency by CPUID, default to \
+                         {TIMER_FREQUENCY_MHZ} MHz"
+                    );
+                    res.eax = TIMER_FREQUENCY_MHZ;
+                }
+                res
+            }
+            _ => cpuid!(regs.rax, regs.rcx),
+        };
+
+        self.guest_regs.rax = res.eax as u64;
+        self.guest_regs.rbx = res.ebx as u64;
+        self.guest_regs.rcx = res.ecx as u64;
+        self.guest_regs.rdx = res.edx as u64;
+        self.vmcb.vmcb_mut().save.rax = self.guest_regs.rax;
+        self.advance_rip(VMEXIT_INSTR_LEN_CPUID)
+    }
+
+    fn handle_apic_msr_access(&mut self, write: bool) -> AxResult {
+        const VMEXIT_INSTR_LEN_RDMSR_WRMSR: u64 = 2;
+
+        self.advance_rip(VMEXIT_INSTR_LEN_RDMSR_WRMSR)?;
+
+        let msr = self.guest_regs.rcx as usize;
+        if write {
+            let value = self.read_edx_eax() as usize;
+            <EmulatedLocalApic as BaseDeviceOps<SysRegAddrRange>>::handle_write(
+                &self.vlapic,
+                SysRegAddr::new(msr),
+                AccessWidth::Qword,
+                value,
+            )
+        } else {
+            let value = <EmulatedLocalApic as BaseDeviceOps<SysRegAddrRange>>::handle_read(
+                &self.vlapic,
+                SysRegAddr::new(msr),
+                AccessWidth::Qword,
+            )? as u64;
+            self.write_edx_eax(value);
+            Ok(())
+        }
+    }
+
+    fn read_edx_eax(&self) -> u64 {
+        ((self.guest_regs.rdx & 0xffff_ffff) << 32) | (self.guest_regs.rax & 0xffff_ffff)
+    }
+
+    fn write_edx_eax(&mut self, val: u64) {
+        self.guest_regs.rax = val & 0xffff_ffff;
+        self.guest_regs.rdx = val >> 32;
+        self.vmcb.vmcb_mut().save.rax = self.guest_regs.rax;
+    }
+
+    fn msr_exit_is_write(exit_info: &SvmExitInfo) -> bool {
+        exit_info.exitinfo1 & 1 != 0
+    }
+
+    fn io_exit_info(exit_info: &SvmExitInfo) -> SvmIoExitInfoDecoded {
+        SvmIoExitInfoDecoded {
+            access_size: exit_info.exitinfo1.get_bits(0..3) as u8,
+            is_string: exit_info.exitinfo1.get_bit(3),
+            is_repeat: exit_info.exitinfo1.get_bit(4),
+            is_in: exit_info.exitinfo1.get_bit(5),
+            port: exit_info.exitinfo1.get_bits(16..32) as u16,
+        }
+    }
+
+    fn nested_page_fault_info(exit_info: &SvmExitInfo) -> NestedPageFaultInfo {
+        let mut access_flags = MappingFlags::empty();
+        if exit_info.exitinfo1.get_bit(1) {
+            access_flags |= MappingFlags::WRITE;
+        }
+        if exit_info.exitinfo1.get_bit(4) {
+            access_flags |= MappingFlags::EXECUTE;
+        }
+        if access_flags.is_empty() {
+            access_flags |= MappingFlags::READ;
+        }
+        NestedPageFaultInfo {
+            access_flags,
+            fault_guest_paddr: GuestPhysAddr::from(exit_info.exitinfo2 as usize),
+        }
+    }
+
+    fn interrupt_vector(exit_info: &SvmExitInfo) -> u64 {
+        if exit_info.exitintinfo.get_bit(31) {
+            exit_info.exitintinfo.get_bits(0..8)
+        } else {
+            0
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SvmIoExitInfoDecoded {
+    port: u16,
+    access_size: u8,
+    is_in: bool,
+    is_string: bool,
+    is_repeat: bool,
 }
 
 impl AxArchVCpu for SvmVcpu {
@@ -244,10 +466,93 @@ impl AxArchVCpu for SvmVcpu {
     }
 
     fn run(&mut self) -> AxResult<AxVCpuExitReason> {
-        ax_err!(
-            Unsupported,
-            "AMD SVM guest execution is not implemented yet"
-        )
+        let Some(exit_info) = self.inner_run()? else {
+            return Ok(AxVCpuExitReason::Nothing);
+        };
+
+        Ok(match exit_info.exit_code {
+            SvmExitCode::INVALID => AxVCpuExitReason::FailEntry {
+                hardware_entry_failure_reason: exit_info.exitcode_raw,
+            },
+            SvmExitCode::VMMCALL => {
+                self.advance_rip(3)?;
+                AxVCpuExitReason::Hypercall {
+                    nr: self.guest_regs.rax,
+                    args: [
+                        self.guest_regs.rdi,
+                        self.guest_regs.rsi,
+                        self.guest_regs.rdx,
+                        self.guest_regs.rcx,
+                        self.guest_regs.r8,
+                        self.guest_regs.r9,
+                    ],
+                }
+            }
+            SvmExitCode::IOIO => {
+                let io_info = Self::io_exit_info(&exit_info);
+                self.advance_rip(0)?;
+
+                if io_info.is_repeat || io_info.is_string {
+                    log::warn!("SVM unsupported IO-Exit: {io_info:#x?} of {exit_info:#x?}");
+                    AxVCpuExitReason::Halt
+                } else {
+                    let width = match AccessWidth::try_from(io_info.access_size as usize) {
+                        Ok(width) => width,
+                        Err(_) => {
+                            log::warn!("SVM invalid IO-Exit: {io_info:#x?} of {exit_info:#x?}");
+                            return Ok(AxVCpuExitReason::Halt);
+                        }
+                    };
+
+                    if io_info.is_in {
+                        AxVCpuExitReason::IoRead {
+                            port: Port(io_info.port),
+                            width,
+                        }
+                    } else if io_info.port == QEMU_EXIT_PORT
+                        && width == AccessWidth::Word
+                        && self.guest_regs.rax == QEMU_EXIT_MAGIC
+                    {
+                        AxVCpuExitReason::SystemDown
+                    } else {
+                        AxVCpuExitReason::IoWrite {
+                            port: Port(io_info.port),
+                            width,
+                            data: self.guest_regs.rax.get_bits(width.bits_range()),
+                        }
+                    }
+                }
+            }
+            SvmExitCode::INTR => AxVCpuExitReason::ExternalInterrupt {
+                vector: Self::interrupt_vector(&exit_info),
+            },
+            SvmExitCode::MSR if Self::msr_exit_is_write(&exit_info) => {
+                AxVCpuExitReason::SysRegWrite {
+                    addr: SysRegAddr::new(self.guest_regs.rcx as usize),
+                    value: self.read_edx_eax(),
+                }
+            }
+            SvmExitCode::MSR => AxVCpuExitReason::SysRegRead {
+                addr: SysRegAddr::new(self.guest_regs.rcx as usize),
+                reg: 0,
+            },
+            SvmExitCode::HLT => {
+                self.advance_rip(1)?;
+                AxVCpuExitReason::Halt
+            }
+            SvmExitCode::SHUTDOWN => AxVCpuExitReason::SystemDown,
+            SvmExitCode::NPF => {
+                let fault = Self::nested_page_fault_info(&exit_info);
+                AxVCpuExitReason::NestedPageFault {
+                    addr: fault.fault_guest_paddr,
+                    access_flags: fault.access_flags,
+                }
+            }
+            _ => {
+                log::warn!("SVM unsupported VM-Exit: {exit_info:#x?}");
+                AxVCpuExitReason::Halt
+            }
+        })
     }
 
     fn bind(&mut self) -> AxResult {
@@ -518,6 +823,26 @@ mod tests {
         let bitmap = msrpm.frames.as_mut_slice();
         assert!(bit_is_set(bitmap, IA32_UMWAIT_CONTROL as usize));
         assert!(bit_is_set(bitmap, 0x1800 * 8 + 0x80));
+    }
+
+    #[test]
+    fn svm_io_exit_info_decodes_exitinfo1() {
+        let exit_info = SvmExitInfo {
+            exitcode_raw: SvmExitCode::IOIO.into(),
+            exit_code: SvmExitCode::IOIO,
+            exitinfo1: 4 | (1 << 3) | (1 << 4) | (1 << 5) | (0x3f8 << 16),
+            exitinfo2: 0,
+            exitintinfo: 0,
+            guest_rip: 0,
+            next_rip: 0,
+        };
+
+        let io = SvmVcpu::io_exit_info(&exit_info);
+        assert_eq!(io.access_size, 4);
+        assert!(io.is_string);
+        assert!(io.is_repeat);
+        assert!(io.is_in);
+        assert_eq!(io.port, 0x3f8);
     }
 
     #[test]
