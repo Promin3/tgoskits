@@ -14,5 +14,19 @@
 
 pub mod cache;
 
-pub fn hardware_check() {}
+pub fn hardware_check() {
+    if axvm::has_hardware_support() {
+        return;
+    }
+
+    #[cfg(feature = "vmx")]
+    panic!("CPU does not support Intel VMX");
+
+    #[cfg(feature = "svm")]
+    panic!("CPU does not support AMD SVM");
+
+    #[cfg(not(any(feature = "vmx", feature = "svm")))]
+    panic!("x86_64 virtualization backend is not selected");
+}
+
 pub fn inject_interrupt(_vector: u8) {}

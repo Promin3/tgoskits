@@ -19,6 +19,12 @@
 //! This crate contains:
 //! - [`AxVM`]: The main structure representing a VM.
 
+#[cfg(all(target_arch = "x86_64", feature = "vmx", feature = "svm"))]
+compile_error!("features `vmx` and `svm` are mutually exclusive on x86_64");
+
+#[cfg(all(target_arch = "x86_64", not(any(feature = "vmx", feature = "svm"))))]
+compile_error!("x86_64 requires either feature `vmx` or feature `svm`");
+
 extern crate alloc;
 #[macro_use]
 extern crate log;
