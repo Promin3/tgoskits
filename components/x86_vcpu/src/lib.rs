@@ -34,6 +34,11 @@ mod ept;
 #[cfg(not(feature = "vmx"))]
 pub(crate) mod regs;
 
+pub use ept::GuestPageWalkInfo;
+#[cfg(any(feature = "vmx", feature = "svm"))]
+pub use msr::Msr;
+pub use regs::GeneralRegisters;
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "vmx")] {
         mod vmx;
@@ -49,25 +54,12 @@ cfg_if::cfg_if! {
             SvmCapabilities, SvmExitInfo, SvmExitReason, SvmFeatures, SvmInterruptInfo,
             SvmIoExitInfo,
         };
-        pub use svm::{
-            EventInj, EventType, InterceptCr, InterceptDr, InterceptException, InterceptInst1,
-            InterceptInst2, NestedPageControl, SvmExitCode, VirtualInterruptControl, Vmcb,
-            VmcbControlArea, VmcbDescriptorTable, VmcbSaveArea, VmcbSegment,
-        };
-        pub use svm::{
-            asid_count, nrip_supported, np_supported, svm_capabilities, svm_features,
-            svm_revision,
-        };
 
         pub use vender::SvmArchVCpu;
         pub use vender::SvmArchPerCpuState;
     }
 }
 
-pub use ept::GuestPageWalkInfo;
-#[cfg(any(feature = "vmx", feature = "svm"))]
-pub use msr::Msr;
-pub use regs::GeneralRegisters;
 #[cfg(any(feature = "vmx", feature = "svm"))]
 pub use vender::has_hardware_support;
 

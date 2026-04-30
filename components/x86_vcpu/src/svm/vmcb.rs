@@ -211,6 +211,17 @@ pub struct VmcbSegment {
     pub base: u64,
 }
 
+impl VmcbSegment {
+    pub const fn new(selector: u16, attrib: u16, limit: u32, base: u64) -> Self {
+        Self {
+            selector,
+            attrib,
+            limit,
+            base,
+        }
+    }
+}
+
 /// VMCB descriptor-table register format.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +229,16 @@ pub struct VmcbDescriptorTable {
     pub limit: u16,
     pub reserved: [u8; 6],
     pub base: u64,
+}
+
+impl VmcbDescriptorTable {
+    pub const fn new(limit: u16, base: u64) -> Self {
+        Self {
+            limit,
+            reserved: [0; 6],
+            base,
+        }
+    }
 }
 
 /// VMCB control area. AMD APM Vol. 2, Appendix B.

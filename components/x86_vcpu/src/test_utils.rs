@@ -20,9 +20,13 @@ pub mod mock {
 
     static GLOBAL_LOCK: Mutex<MockMmHalState> = Mutex::new(MockMmHalState::new());
 
+    #[repr(align(4096))]
+    #[derive(Clone, Copy)]
+    struct MockPage([u8; 4096]);
+
     // State for the mock memory allocator
     struct MockMmHalState {
-        memory_pool: [[u8; 4096]; 16],
+        memory_pool: [MockPage; 16],
         alloc_mask: u16,
         reset_counter: usize,
     }
@@ -31,7 +35,7 @@ pub mod mock {
         // Create a new instance of MockMmHalState
         const fn new() -> Self {
             Self {
-                memory_pool: [[0; 4096]; 16],
+                memory_pool: [MockPage([0; 4096]); 16],
                 alloc_mask: 0,
                 reset_counter: 0,
             }
@@ -59,8 +63,22 @@ pub mod mock {
         }
 
         /// Allocate a number of contiguous frames, with a specified alignment.
-        fn alloc_contiguous_frames(_num_frames: usize, _frame_align: usize) -> Option<PhysAddr> {
-            unimplemented!()
+        fn alloc_contiguous_frames(num_frames: usize, frame_align: usize) -> Option<PhysAddr> {
+            let mut state = GLOBAL_LOCK.lock();
+            if num_frames == 0 || num_frames > 16 || frame_align > 4096 {
+                return None;
+            }
+
+            let limit = 16 - num_frames;
+            for start in 0..=limit {
+                let mask = ((1u32 << num_frames) - 1) << start;
+                if (state.alloc_mask as u32 & mask) == 0 {
+                    state.alloc_mask |= mask as u16;
+                    let phys_addr = 0x1000 + (start * 4096);
+                    return Some(ax_memory_addr::PhysAddr::from(phys_addr));
+                }
+            }
+            None
         }
 
         /// Deallocate a frame allocated previously by [`alloc_frame`].
@@ -77,8 +95,15 @@ pub mod mock {
 
         /// Deallocate a number of contiguous frames allocated previously by
         /// [`alloc_contiguous_frames`].
-        fn dealloc_contiguous_frames(_first_addr: PhysAddr, _num_frames: usize) {
-            unimplemented!()
+        fn dealloc_contiguous_frames(first_addr: PhysAddr, num_frames: usize) {
+            let mut state = GLOBAL_LOCK.lock();
+
+            let addr = first_addr.as_usize();
+            if addr >= 0x1000 && addr < 0x1000 + (16 * 4096) && (addr - 0x1000) % 4096 == 0 {
+                let start = (addr - 0x1000) / 4096;
+                let mask = ((1u32 << num_frames) - 1) << start;
+                state.alloc_mask &= !(mask as u16);
+            }
         }
 
         /// Convert a physical address to a virtual address.
@@ -90,7 +115,7 @@ pub mod mock {
                 let page_index = (addr - 0x1000) / 4096;
                 let offset = (addr - 0x1000) % 4096;
 
-                let page_ptr = state.memory_pool[page_index].as_ptr();
+                let page_ptr = state.memory_pool[page_index].0.as_ptr();
                 ax_memory_addr::VirtAddr::from(unsafe { page_ptr.add(offset) as usize })
             } else {
                 ax_memory_addr::VirtAddr::from(addr)
@@ -118,7 +143,7 @@ pub mod mock {
         #[allow(dead_code)]
         pub fn reset() {
             let mut state = GLOBAL_LOCK.lock();
-            state.memory_pool = [[0; 4096]; 16];
+            state.memory_pool = [MockPage([0; 4096]); 16];
             state.alloc_mask = 0;
             state.reset_counter += 1;
         }
