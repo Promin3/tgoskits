@@ -16,8 +16,15 @@
 
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
-        pub use x86_vcpu::VmxArchVCpu as AxArchVCpuImpl;
-        pub use x86_vcpu::VmxArchPerCpuState as AxVMArchPerCpuImpl;
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "vmx")] {
+                pub use x86_vcpu::VmxArchVCpu as AxArchVCpuImpl;
+                pub use x86_vcpu::VmxArchPerCpuState as AxVMArchPerCpuImpl;
+            } else if #[cfg(feature = "svm")] {
+                pub use x86_vcpu::SvmArchVCpu as AxArchVCpuImpl;
+                pub use x86_vcpu::SvmArchPerCpuState as AxVMArchPerCpuImpl;
+            }
+        }
         pub use x86_vcpu::has_hardware_support;
         #[allow(dead_code)]
         pub type AxVCpuCreateConfig = ();

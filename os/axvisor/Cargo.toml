@@ -39,6 +39,8 @@ path = "xtask/src/main.rs"
 [features]
 default = []
 ept-level-4 = []
+vmx = ["axvm/vmx"]
+svm = ["axvm/svm"]
 fs = ["ax-std/fs"]
 sstc = ["riscv_vcpu/sstc"]
 dyn-plat = ["ax-std/plat-dyn", "dep:axplat-dyn"]

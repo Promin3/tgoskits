@@ -42,15 +42,22 @@ cfg_if::cfg_if! {
 
         pub use vender::VmxArchVCpu;
         pub use vender::VmxArchPerCpuState;
+    } else if #[cfg(feature = "svm")] {
+        mod svm;
+        use svm as vender;
+        pub use svm::{SvmExitInfo, SvmExitReason, SvmInterruptInfo, SvmIoExitInfo};
+
+        pub use vender::SvmArchVCpu;
+        pub use vender::SvmArchPerCpuState;
     }
 }
 
 pub use ept::GuestPageWalkInfo;
 pub use regs::GeneralRegisters;
-#[cfg(feature = "vmx")]
+#[cfg(any(feature = "vmx", feature = "svm"))]
 pub use vender::has_hardware_support;
 
-#[cfg(not(feature = "vmx"))]
+#[cfg(not(any(feature = "vmx", feature = "svm")))]
 pub fn has_hardware_support() -> bool {
     false
 }
