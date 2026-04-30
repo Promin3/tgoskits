@@ -19,6 +19,13 @@ use axvisor_api::vmm::{VCpuId, VMId};
 
 use crate::regs::GeneralRegisters;
 
+mod cpuid;
+
+pub use cpuid::{
+    SvmCapabilities, SvmFeatures, asid_count, has_svm, np_supported, nrip_supported,
+    svm_capabilities, svm_features, svm_revision,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvmExitReason {
     Unsupported,
@@ -134,5 +141,5 @@ pub type SvmArchVCpu = SvmVcpu;
 pub type SvmArchPerCpuState = SvmPerCpuState;
 
 pub fn has_hardware_support() -> bool {
-    false
+    has_svm()
 }

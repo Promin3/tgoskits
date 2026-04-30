@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "vmx")]
+#[cfg(any(feature = "vmx", feature = "svm"))]
 use x86::msr::{rdmsr, wrmsr};
 
 /// X86 model-specific registers. (SDM Vol. 4)
@@ -52,12 +52,20 @@ pub enum Msr {
     IA32_FS_BASE         = 0xc000_0100,
     IA32_GS_BASE         = 0xc000_0101,
     IA32_KERNEL_GSBASE   = 0xc000_0102,
+    AMD_TSC_RATIO        = 0xc000_0104,
+
+    AMD_VM_CR            = 0xc001_0114,
+    AMD_SMM_CTL          = 0xc001_0116,
+    AMD_VM_HSAVE_PA      = 0xc001_0117,
+    AMD_VIRT_SPEC_CTRL   = 0xc001_011f,
+    AMD_OSVW_ID_LENGTH   = 0xc001_0140,
+    AMD_OSVW_STATUS      = 0xc001_0141,
 }
 
 impl Msr {
     /// Read 64 bits msr register.
     #[inline(always)]
-    #[cfg(feature = "vmx")]
+    #[cfg(any(feature = "vmx", feature = "svm"))]
     pub fn read(self) -> u64 {
         unsafe { rdmsr(self as _) }
     }
@@ -69,7 +77,7 @@ impl Msr {
     /// The caller must ensure that this write operation has no unsafe side
     /// effects.
     #[inline(always)]
-    #[cfg(feature = "vmx")]
+    #[cfg(any(feature = "vmx", feature = "svm"))]
     pub unsafe fn write(self, value: u64) {
         unsafe { wrmsr(self as _, value) }
     }
@@ -104,6 +112,8 @@ mod tests {
         assert_eq!(Msr::IA32_VMX_BASIC as u32, 0x480);
         assert_eq!(Msr::IA32_EFER as u32, 0xc000_0080);
         assert_eq!(Msr::IA32_LSTAR as u32, 0xc000_0082);
+        assert_eq!(Msr::AMD_VM_CR as u32, 0xc001_0114);
+        assert_eq!(Msr::AMD_VM_HSAVE_PA as u32, 0xc001_0117);
     }
 
     #[test]
@@ -169,16 +179,27 @@ mod tests {
         assert_eq!(Msr::IA32_CSTAR as u32 + 1, Msr::IA32_FMASK as u32);
     }
 
-    // Note: We can't test the actual read/write methods without running on real hardware
-    // and having the appropriate privileges. Those would be integration tests.
+    #[test]
+    fn test_amd_svm_msr_values() {
+        assert_eq!(Msr::AMD_TSC_RATIO as u32, 0xc000_0104);
+        assert_eq!(Msr::AMD_VM_CR as u32, 0xc001_0114);
+        assert_eq!(Msr::AMD_SMM_CTL as u32, 0xc001_0116);
+        assert_eq!(Msr::AMD_VM_HSAVE_PA as u32, 0xc001_0117);
+        assert_eq!(Msr::AMD_VIRT_SPEC_CTRL as u32, 0xc001_011f);
+        assert_eq!(Msr::AMD_OSVW_ID_LENGTH as u32, 0xc001_0140);
+        assert_eq!(Msr::AMD_OSVW_STATUS as u32, 0xc001_0141);
+    }
 
     // Mock implementation for testing the MsrReadWrite trait
+    #[cfg(feature = "vmx")]
     struct TestMsr;
 
+    #[cfg(feature = "vmx")]
     impl MsrReadWrite for TestMsr {
         const MSR: Msr = Msr::IA32_PAT;
     }
 
+    #[cfg(feature = "vmx")]
     #[test]
     fn test_msr_read_write_trait() {
         // Test that the trait compiles and has the expected methods

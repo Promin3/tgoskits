@@ -45,7 +45,14 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "svm")] {
         mod svm;
         use svm as vender;
-        pub use svm::{SvmExitInfo, SvmExitReason, SvmInterruptInfo, SvmIoExitInfo};
+        pub use svm::{
+            SvmCapabilities, SvmExitInfo, SvmExitReason, SvmFeatures, SvmInterruptInfo,
+            SvmIoExitInfo,
+        };
+        pub use svm::{
+            asid_count, nrip_supported, np_supported, svm_capabilities, svm_features,
+            svm_revision,
+        };
 
         pub use vender::SvmArchVCpu;
         pub use vender::SvmArchPerCpuState;
@@ -53,6 +60,8 @@ cfg_if::cfg_if! {
 }
 
 pub use ept::GuestPageWalkInfo;
+#[cfg(any(feature = "vmx", feature = "svm"))]
+pub use msr::Msr;
 pub use regs::GeneralRegisters;
 #[cfg(any(feature = "vmx", feature = "svm"))]
 pub use vender::has_hardware_support;
