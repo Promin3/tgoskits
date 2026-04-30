@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use alloc::collections::VecDeque;
+use core::{arch::naked_asm, mem::size_of};
 
 use ax_errno::{AxResult, ax_err, ax_err_type};
 use ax_memory_addr::{MemoryAddr, PAGE_SIZE_4K as PAGE_SIZE};
@@ -25,15 +26,13 @@ use axvisor_api::{
 use x86_64::registers::control::Cr0Flags;
 use x86_vlapic::EmulatedLocalApic;
 
+use super::vmcb::{
+    EventInj, InterceptException, InterceptInst1, InterceptInst2, NestedPageControl, Vmcb,
+    VmcbDescriptorTable, VmcbSegment,
+};
 #[cfg(not(test))]
 use crate::msr::Msr;
-use crate::{
-    regs::GeneralRegisters,
-    svm::{
-        InterceptException, InterceptInst1, InterceptInst2, NestedPageControl, Vmcb,
-        VmcbDescriptorTable, VmcbSegment,
-    },
-};
+use crate::regs::GeneralRegisters;
 
 const QEMU_EXIT_PORT: u16 = 0x604;
 const IA32_UMWAIT_CONTROL: u32 = 0xe1;
@@ -45,6 +44,7 @@ const DEFAULT_ASID: u32 = 1;
 pub struct SvmVcpu {
     guest_regs: GeneralRegisters,
     host_stack_top: u64,
+    vmcb_pa: u64,
 
     launched: bool,
     entry: Option<GuestPhysAddr>,
@@ -54,7 +54,7 @@ pub struct SvmVcpu {
     iopm: Iopm,
     msrpm: Msrpm,
 
-    pending_events: VecDeque<(u8, Option<u32>)>,
+    pending_events: VecDeque<EventInj>,
     vlapic: EmulatedLocalApic,
 }
 
@@ -63,6 +63,7 @@ impl SvmVcpu {
         let mut vcpu = Self {
             guest_regs: GeneralRegisters::default(),
             host_stack_top: 0,
+            vmcb_pa: 0,
             launched: false,
             entry: None,
             ept_root: None,
@@ -72,6 +73,7 @@ impl SvmVcpu {
             pending_events: VecDeque::with_capacity(8),
             vlapic: EmulatedLocalApic::new(vm_id, vcpu_id),
         };
+        vcpu.vmcb_pa = vcpu.vmcb.phys_addr().as_usize() as u64;
         vcpu.setup_iopm()?;
         vcpu.setup_msrpm()?;
         log::info!(
@@ -91,6 +93,7 @@ impl SvmVcpu {
 
     pub fn setup_vmcb(&mut self, entry: GuestPhysAddr, ept_root: HostPhysAddr) -> AxResult {
         self.vmcb.clear();
+        self.vmcb_pa = self.vmcb.phys_addr().as_usize() as u64;
         self.setup_vmcb_guest(entry);
         self.setup_vmcb_control(ept_root);
         Ok(())
@@ -176,6 +179,41 @@ impl SvmVcpu {
         }
         Ok(())
     }
+
+    /// Enter the guest through AMD SVM `VMRUN`.
+    ///
+    /// This function never returns directly from its own instruction stream. On `#VMEXIT`,
+    /// execution resumes after `vmrun` and the same naked frame restores the host stack before
+    /// returning to Rust.
+    #[unsafe(naked)]
+    unsafe extern "C" fn vmrun(&mut self) {
+        naked_asm!(
+            save_regs_to_stack!(),
+            "mov    [rdi + {host_stack_top}], rsp",
+            "mov    rsp, rdi",
+            restore_regs_from_stack!(),
+            "mov    rax, [rsp + {vmcb_pa}]",
+            "vmrun  rax",
+            save_regs_to_stack!(),
+            "mov    rsp, [rsp + {host_stack_top}]",
+            restore_regs_from_stack!(),
+            "ret",
+            host_stack_top = const size_of::<GeneralRegisters>(),
+            vmcb_pa = const size_of::<u64>(),
+        );
+    }
+
+    /// Execute one raw `VMRUN` round without VMEXIT handling.
+    ///
+    /// Stage seven will replace the public `run()` placeholder with full pending-event
+    /// injection and VMEXIT dispatch. This helper keeps stage six focused on the register and
+    /// stack transition itself.
+    pub unsafe fn raw_vmrun(&mut self) {
+        self.vmcb.vmcb_mut().save.rax = self.guest_regs.rax;
+        unsafe { self.vmrun() };
+        self.guest_regs.rax = self.vmcb.vmcb().save.rax;
+        self.launched = true;
+    }
 }
 
 impl AxArchVCpu for SvmVcpu {
@@ -226,7 +264,8 @@ impl AxArchVCpu for SvmVcpu {
     }
 
     fn inject_interrupt(&mut self, vector: usize) -> AxResult {
-        self.pending_events.push_back((vector as u8, None));
+        self.pending_events
+            .push_back(EventInj::external_interrupt(vector as u8));
         Ok(())
     }
 
@@ -406,6 +445,8 @@ fn host_pat() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::{offset_of, size_of};
+
     use axvisor_api::memory::MemoryIf;
     use spin::{Mutex, MutexGuard};
 
@@ -420,6 +461,19 @@ mod tests {
 
     fn bit_is_set(bitmap: &[u8], bit: usize) -> bool {
         bitmap[bit / 8] & (1 << (bit % 8)) != 0
+    }
+
+    #[test]
+    fn svm_vcpu_vmrun_assembly_offsets_match_layout() {
+        assert_eq!(offset_of!(SvmVcpu, guest_regs), 0);
+        assert_eq!(
+            offset_of!(SvmVcpu, host_stack_top),
+            size_of::<GeneralRegisters>()
+        );
+        assert_eq!(
+            offset_of!(SvmVcpu, vmcb_pa),
+            size_of::<GeneralRegisters>() + size_of::<u64>()
+        );
     }
 
     #[test]
@@ -479,6 +533,7 @@ mod tests {
         vcpu.setup(()).unwrap();
 
         let vmcb = vcpu.vmcb();
+        assert_eq!(vcpu.vmcb_pa, vcpu.vmcb.phys_addr().as_usize() as u64);
         assert_eq!(vmcb.save.cs, VmcbSegment::new(0, 0x9b, 0xffff, 0));
         assert_eq!(vmcb.save.ds, VmcbSegment::new(0, 0x93, 0xffff, 0));
         assert_eq!(vmcb.save.rip, entry.as_usize() as u64);

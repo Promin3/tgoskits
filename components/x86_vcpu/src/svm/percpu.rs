@@ -20,7 +20,7 @@ use axvisor_api::memory::PhysFrame;
 use bitflags::bitflags;
 use x86_64::registers::model_specific::EferFlags;
 
-use crate::{msr::Msr, svm::has_hardware_support};
+use crate::{msr::Msr, svm::cpuid::svm_capabilities};
 
 bitflags! {
     /// AMD VM_CR flags used by SVM global enable checks.
@@ -92,8 +92,12 @@ impl AxArchPerCpu for SvmPerCpuState {
     }
 
     fn hardware_enable(&mut self) -> AxResult {
-        if !has_hardware_support() {
+        let capabilities = svm_capabilities();
+        if !capabilities.supported {
             return ax_err!(Unsupported, "CPU does not support feature SVM");
+        }
+        if !capabilities.features.nested_paging {
+            return ax_err!(Unsupported, "CPU does not support SVM nested paging");
         }
         if self.is_enabled() {
             return ax_err!(ResourceBusy, "SVM is already turned on");
@@ -116,9 +120,12 @@ impl AxArchPerCpu for SvmPerCpuState {
 
         self.vm_hsave_frame = Some(frame);
         log::info!(
-            "[AxVM] succeeded to turn on SVM on CPU {}, host save area {:#x}.",
+            "[AxVM] succeeded to turn on SVM on CPU {}, host save area {:#x}, revision {}, ASIDs \
+             {}.",
             self.cpu_id,
-            vm_hsave_pa.as_usize()
+            vm_hsave_pa.as_usize(),
+            capabilities.revision,
+            capabilities.asid_count
         );
         Ok(())
     }

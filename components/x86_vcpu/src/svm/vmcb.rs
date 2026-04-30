@@ -162,20 +162,15 @@ bitflags! {
     }
 }
 
-/// VMCB event injection type encoded in EVENTINJ bits 10:8.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventType {
-    ExternalInterrupt = 0,
-    Nmi               = 2,
-    Exception         = 3,
-    SoftwareInterrupt = 4,
-}
-
 impl EventInj {
-    pub fn new(vector: u8, event_type: EventType, error_code: Option<u32>) -> Self {
+    const TYPE_EXTERNAL_INTERRUPT: u64 = 0;
+
+    #[cfg(test)]
+    const TYPE_EXCEPTION: u64 = 3;
+
+    fn new(vector: u8, event_type: u64, error_code: Option<u32>) -> Self {
         let mut bits = vector as u64;
-        bits.set_bits(8..11, event_type as u64);
+        bits.set_bits(8..11, event_type);
         if let Some(error_code) = error_code {
             bits.set_bit(11, true);
             bits.set_bits(32..64, error_code as u64);
@@ -184,13 +179,8 @@ impl EventInj {
         Self::from_bits_retain(bits)
     }
 
-    pub fn vector(self) -> u8 {
-        self.bits().get_bits(0..8) as u8
-    }
-
-    pub fn error_code(self) -> Option<u32> {
-        self.contains(Self::ERROR_CODE_VALID)
-            .then(|| self.bits().get_bits(32..64) as u32)
+    pub fn external_interrupt(vector: u8) -> Self {
+        Self::new(vector, Self::TYPE_EXTERNAL_INTERRUPT, None)
     }
 }
 
@@ -620,12 +610,12 @@ mod tests {
 
     #[test]
     fn eventinj_encodes_vector_type_and_error_code() {
-        let event = EventInj::new(14, EventType::Exception, Some(0x1234));
+        let event = EventInj::new(14, EventInj::TYPE_EXCEPTION, Some(0x1234));
 
         assert!(event.contains(EventInj::VALID));
-        assert_eq!(event.vector(), 14);
-        assert_eq!(event.bits().get_bits(8..11), EventType::Exception as u64);
-        assert_eq!(event.error_code(), Some(0x1234));
+        assert_eq!(event.bits().get_bits(0..8), 14);
+        assert_eq!(event.bits().get_bits(8..11), EventInj::TYPE_EXCEPTION);
+        assert_eq!(event.bits().get_bits(32..64) as u32, 0x1234);
     }
 
     #[test]

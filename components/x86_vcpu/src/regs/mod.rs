@@ -77,7 +77,7 @@ impl GeneralRegisters {
     }
 }
 
-#[cfg(feature = "vmx")]
+#[cfg(any(feature = "vmx", feature = "svm"))]
 macro_rules! save_regs_to_stack {
     () => {
         "
@@ -100,7 +100,7 @@ macro_rules! save_regs_to_stack {
     };
 }
 
-#[cfg(feature = "vmx")]
+#[cfg(any(feature = "vmx", feature = "svm"))]
 macro_rules! restore_regs_from_stack {
     () => {
         "

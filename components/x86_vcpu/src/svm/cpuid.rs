@@ -53,32 +53,6 @@ pub fn has_svm() -> bool {
         .is_some_and(|f| f.has_svm())
 }
 
-/// Returns the SVM revision as `(minor, major)`.
-pub fn svm_revision() -> (u8, u8) {
-    let revision = svm_capabilities().revision;
-    (revision & 0x0f, revision >> 4)
-}
-
-/// Returns decoded SVM feature bits for the current CPU.
-pub fn svm_features() -> SvmFeatures {
-    svm_capabilities().features
-}
-
-/// Returns whether SVM nested paging is supported by the current CPU.
-pub fn np_supported() -> bool {
-    svm_features().nested_paging
-}
-
-/// Returns whether SVM NRIP save is supported by the current CPU.
-pub fn nrip_supported() -> bool {
-    svm_features().nrip_save
-}
-
-/// Returns the number of ASIDs reported by the current CPU.
-pub fn asid_count() -> u32 {
-    svm_capabilities().asid_count
-}
-
 /// Returns a consolidated SVM capability snapshot for the current CPU.
 pub fn svm_capabilities() -> SvmCapabilities {
     svm_capabilities_from_cpuid(&CpuId::new())

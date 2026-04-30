@@ -17,17 +17,10 @@ mod percpu;
 mod vcpu;
 mod vmcb;
 
-pub use cpuid::{
-    SvmCapabilities, SvmFeatures, asid_count, has_svm, np_supported, nrip_supported,
-    svm_capabilities, svm_features, svm_revision,
-};
+pub use cpuid::has_svm;
 pub use percpu::SvmPerCpuState;
-pub use vcpu::{ContiguousFrames, Iopm, Msrpm, SvmVcpu, VmcbFrame};
-pub use vmcb::{
-    EventInj, EventType, InterceptCr, InterceptDr, InterceptException, InterceptInst1,
-    InterceptInst2, NestedPageControl, SvmExitCode, SvmExitInfo, VirtualInterruptControl, Vmcb,
-    VmcbControlArea, VmcbDescriptorTable, VmcbSaveArea, VmcbSegment,
-};
+pub use vcpu::SvmVcpu;
+pub use vmcb::SvmExitInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvmExitReason {

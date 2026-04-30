@@ -27,11 +27,11 @@ extern crate alloc;
 mod test_utils;
 
 pub(crate) mod msr;
-#[cfg(feature = "vmx")]
+#[cfg(any(feature = "vmx", feature = "svm"))]
 #[macro_use]
 pub(crate) mod regs;
 mod ept;
-#[cfg(not(feature = "vmx"))]
+#[cfg(not(any(feature = "vmx", feature = "svm")))]
 pub(crate) mod regs;
 
 pub use ept::GuestPageWalkInfo;
@@ -50,10 +50,7 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "svm")] {
         mod svm;
         use svm as vender;
-        pub use svm::{
-            SvmCapabilities, SvmExitInfo, SvmExitReason, SvmFeatures, SvmInterruptInfo,
-            SvmIoExitInfo,
-        };
+        pub use svm::{SvmExitInfo, SvmExitReason, SvmInterruptInfo, SvmIoExitInfo};
 
         pub use vender::SvmArchVCpu;
         pub use vender::SvmArchPerCpuState;
