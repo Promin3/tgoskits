@@ -14,17 +14,19 @@
 
 use ax_errno::{AxResult, ax_err};
 use axaddrspace::{GuestPhysAddr, HostPhysAddr};
-use axvcpu::{AxArchPerCpu, AxArchVCpu, AxVCpuExitReason};
+use axvcpu::{AxArchVCpu, AxVCpuExitReason};
 use axvisor_api::vmm::{VCpuId, VMId};
 
 use crate::regs::GeneralRegisters;
 
 mod cpuid;
+mod percpu;
 
 pub use cpuid::{
     SvmCapabilities, SvmFeatures, asid_count, has_svm, np_supported, nrip_supported,
     svm_capabilities, svm_features, svm_revision,
 };
+pub use percpu::SvmPerCpuState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvmExitReason {
@@ -49,38 +51,9 @@ pub struct SvmIoExitInfo {
     pub is_in: bool,
 }
 
-#[derive(Debug)]
-pub struct SvmPerCpuState {
-    _cpu_id: usize,
-}
-
 #[derive(Debug, Default)]
 pub struct SvmVcpu {
     guest_regs: GeneralRegisters,
-}
-
-impl AxArchPerCpu for SvmPerCpuState {
-    fn new(cpu_id: usize) -> AxResult<Self> {
-        Ok(Self { _cpu_id: cpu_id })
-    }
-
-    fn is_enabled(&self) -> bool {
-        false
-    }
-
-    fn hardware_enable(&mut self) -> AxResult {
-        ax_err!(
-            Unsupported,
-            "AMD SVM support is not implemented yet for this target"
-        )
-    }
-
-    fn hardware_disable(&mut self) -> AxResult {
-        ax_err!(
-            Unsupported,
-            "AMD SVM support is not implemented yet for this target"
-        )
-    }
 }
 
 impl AxArchVCpu for SvmVcpu {
