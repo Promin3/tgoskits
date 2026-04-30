@@ -21,21 +21,22 @@ use crate::regs::GeneralRegisters;
 
 mod cpuid;
 mod percpu;
+mod vmcb;
 
 pub use cpuid::{
     SvmCapabilities, SvmFeatures, asid_count, has_svm, np_supported, nrip_supported,
     svm_capabilities, svm_features, svm_revision,
 };
 pub use percpu::SvmPerCpuState;
+pub use vmcb::{
+    EventInj, EventType, InterceptCr, InterceptDr, InterceptException, InterceptInst1,
+    InterceptInst2, NestedPageControl, SvmExitCode, SvmExitInfo, VirtualInterruptControl, Vmcb,
+    VmcbControlArea, VmcbDescriptorTable, VmcbSaveArea, VmcbSegment,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvmExitReason {
     Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SvmExitInfo {
-    pub exit_code: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

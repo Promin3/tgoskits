@@ -50,6 +50,11 @@ cfg_if::cfg_if! {
             SvmIoExitInfo,
         };
         pub use svm::{
+            EventInj, EventType, InterceptCr, InterceptDr, InterceptException, InterceptInst1,
+            InterceptInst2, NestedPageControl, SvmExitCode, VirtualInterruptControl, Vmcb,
+            VmcbControlArea, VmcbDescriptorTable, VmcbSaveArea, VmcbSegment,
+        };
+        pub use svm::{
             asid_count, nrip_supported, np_supported, svm_capabilities, svm_features,
             svm_revision,
         };
