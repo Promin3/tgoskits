@@ -934,21 +934,14 @@ impl UsbFsManager {
         stable_id: UsbStableId,
         request: TransferRequest,
     ) -> AxResult<SubmittedTransfer> {
-        info!("usbfs: live control submit ensure start");
         self.live_ensure_configured(stable_id)?;
-        info!("usbfs: live control submit ensure done");
         let live_device = self.live_device_by_id(stable_id)?;
-        info!("usbfs: live control submit ep0 start");
         let request_id = live_device
             .device
             .lock()
             .ctrl_ep_mut()
             .submit(request)
             .map_err(map_transfer_error)?;
-        info!(
-            "usbfs: live control submit ep0 queued request={:#x}",
-            request_id.raw()
-        );
         Ok(SubmittedTransfer {
             inner: SubmittedTransferInner::Control {
                 live_device,

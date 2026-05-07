@@ -538,12 +538,13 @@ impl UsbDeviceFile {
         completion: TransferCompletion,
     ) -> UrbTransferResult {
         let data = if submitted.is_in {
-            let actual = if submitted.packet_lengths.is_empty() {
-                completion.actual_length
-            } else {
-                iso_copy_len(&submitted.packet_lengths, &completion.iso_packets)
-            }
-            .min(submitted.buffer.len());
+            let actual =
+                if submitted.packet_lengths.is_empty() || completion.iso_packets.is_empty() {
+                    completion.actual_length
+                } else {
+                    iso_copy_len(&submitted.packet_lengths, &completion.iso_packets)
+                }
+                .min(submitted.buffer.len());
             submitted.buffer.truncate(actual);
             submitted.buffer
         } else {
@@ -773,7 +774,7 @@ impl UsbDeviceFile {
 
         let log = usbfs_should_log_urb();
         if log {
-            info!(
+            debug!(
                 "usbfs: submit control urb ptr={:#x} req_type={:#04x} req={:#04x} value={:#06x} \
                  index={:#06x} len={}",
                 arg, b_request_type, b_request, w_value, w_index, w_length
@@ -811,7 +812,7 @@ impl UsbDeviceFile {
         }
         let transfer = transfer?;
         if log {
-            info!("usbfs: submit control urb queued ptr={:#x}", arg);
+            debug!("usbfs: submit control urb queued ptr={:#x}", arg);
         }
         self.submitted_urbs.lock().push_back(SubmittedUrb {
             user_urb_ptr: arg,
@@ -935,11 +936,16 @@ impl UsbDeviceFile {
         self.collect_submitted_urbs(None);
         if !nonblocking && self.pending_urbs.lock().is_empty() {
             ax_task::future::block_on(poll_fn(|cx| {
-                if self.collect_submitted_urbs(Some(cx)) || !self.pending_urbs.lock().is_empty() {
+                if self.collect_submitted_urbs(None) || !self.pending_urbs.lock().is_empty() {
                     Poll::Ready(())
                 } else {
                     self.poll_urbs.register(cx.waker());
-                    Poll::Pending
+                    if self.collect_submitted_urbs(Some(cx)) || !self.pending_urbs.lock().is_empty()
+                    {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
                 }
             }));
         }
@@ -950,7 +956,7 @@ impl UsbDeviceFile {
         self.write_completed_urb(completed)?;
         (arg as *mut usize).vm_write(user_urb_ptr)?;
         if usbfs_should_log_urb() {
-            info!("usbfs: reap urb returns ptr={:#x}", user_urb_ptr);
+            debug!("usbfs: reap urb returns ptr={:#x}", user_urb_ptr);
         }
         Ok(0)
     }
@@ -1009,7 +1015,7 @@ impl FileLike for UsbDeviceFile {
             descriptor::USBDEVFS_CONTROL => {
                 let log = usbfs_should_log_urb();
                 if log && let Ok(ctrl) = descriptor::read_usbdevfs_ctrltransfer(arg) {
-                    info!(
+                    debug!(
                         "usbfs: control ioctl req_type={:#04x} req={:#04x} value={:#06x} \
                          index={:#06x} len={}",
                         ctrl.b_request_type,
@@ -1028,7 +1034,7 @@ impl FileLike for UsbDeviceFile {
                             arg,
                         );
                         if log {
-                            info!("usbfs: snapshot control ioctl result={:?}", result);
+                            debug!("usbfs: snapshot control ioctl result={:?}", result);
                         }
                         return result;
                     }
@@ -1037,7 +1043,7 @@ impl FileLike for UsbDeviceFile {
                 }
                 let result = self.with_live_lease(|lease| lease.ioctl(cmd, arg));
                 if log {
-                    info!("usbfs: control ioctl result={:?}", result);
+                    debug!("usbfs: control ioctl result={:?}", result);
                 }
                 result
             }
@@ -1104,10 +1110,10 @@ impl Pollable for UsbDeviceFile {
 
     fn register(&self, context: &mut Context<'_>, events: IoEvents) {
         if events.intersects(IoEvents::IN | IoEvents::OUT) {
-            if self.collect_submitted_urbs(Some(context)) {
+            self.poll_urbs.register(context.waker());
+            if self.collect_submitted_urbs(Some(context)) || !self.pending_urbs.lock().is_empty() {
                 context.waker().wake_by_ref();
             }
-            self.poll_urbs.register(context.waker());
         }
     }
 }

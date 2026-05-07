@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use ax_lazyinit::LazyInit;
@@ -12,6 +12,15 @@ use super::manager::UsbFsManager;
 
 static USBFS_MANAGER: LazyInit<Arc<UsbFsManager>> = LazyInit::new();
 static USBFS_IRQ_REGISTRY: LazyInit<UsbIrqRegistry> = LazyInit::new();
+static USBFS_IRQ_LOG_BUDGET: AtomicUsize = AtomicUsize::new(128);
+
+fn take_irq_log_budget() -> bool {
+    USBFS_IRQ_LOG_BUDGET
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+}
 
 pub(super) struct PendingUsbIrqSlot {
     pub(super) irq_num: usize,
@@ -120,12 +129,41 @@ fn usbfs_irq_handler(irq_num: usize) {
         return;
     };
 
-    trace!(
-        "usbfs: handling IRQ {} for bus {} host {:?}",
-        irq_num, slot.bus_num, slot.device_id
-    );
+    let mut handler_calls = 0usize;
+    let mut port_events = 0usize;
+    let mut stopped_events = 0usize;
+    loop {
+        handler_calls += 1;
+        match slot.handler.handle_event() {
+            Event::PortChange { port } => {
+                port_events += 1;
+                if take_irq_log_budget() {
+                    info!(
+                        "usbfs: IRQ {} bus {} host {:?}: port change on port {}",
+                        irq_num, slot.bus_num, slot.device_id, port
+                    );
+                }
+            }
+            Event::Stopped => {
+                stopped_events += 1;
+                if take_irq_log_budget() {
+                    info!(
+                        "usbfs: IRQ {} bus {} host {:?}: event handler stopped",
+                        irq_num, slot.bus_num, slot.device_id
+                    );
+                }
+            }
+            Event::Nothing => break,
+        }
+    }
 
-    while let Event::PortChange { .. } | Event::Stopped = slot.handler.handle_event() {}
+    if take_irq_log_budget() {
+        info!(
+            "usbfs: IRQ {} bus {} host {:?}: handled calls={} port_events={} stopped_events={}",
+            irq_num, slot.bus_num, slot.device_id, handler_calls, port_events, stopped_events
+        );
+    }
+
     slot.dirty.store(true, Ordering::Release);
 
     if let Some(manager) = USBFS_MANAGER.get() {
