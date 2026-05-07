@@ -68,6 +68,7 @@ struct UsbDeviceRecord {
     open_count: usize,
     openable: bool,
     synthetic: bool,
+    next_session_id: u64,
 }
 
 type EndpointHandle = Arc<Mutex<Endpoint>>;
@@ -75,6 +76,8 @@ type EndpointHandle = Arc<Mutex<Endpoint>>;
 struct LiveDeviceState {
     device: Mutex<Device>,
     endpoints: RwLock<BTreeMap<u8, EndpointHandle>>,
+    endpoint_interfaces: RwLock<BTreeMap<u8, u8>>,
+    interface_owners: Mutex<BTreeMap<u8, u64>>,
 }
 
 pub(super) struct IsoTransferResult {
@@ -231,6 +234,7 @@ pub(super) struct UsbFsManager {
 pub(super) struct UsbDeviceLease {
     manager: Arc<UsbFsManager>,
     stable_id: UsbStableId,
+    session_id: u64,
 }
 
 impl UsbDeviceLease {
@@ -240,11 +244,7 @@ impl UsbDeviceLease {
 
     pub(super) fn claim_interface(&self, interface: u8, alternate: u8) -> AxResult<()> {
         self.manager
-            .live_claim_interface(self.stable_id, interface, alternate)
-    }
-
-    pub(super) fn ensure_configured(&self) -> AxResult<()> {
-        self.manager.live_ensure_configured(self.stable_id)
+            .live_claim_interface(self.stable_id, self.session_id, interface, alternate)
     }
 
     pub(super) fn set_configuration(&self, configuration: u8) -> AxResult<()> {
@@ -311,6 +311,11 @@ impl UsbDeviceLease {
         self.manager
             .live_release_endpoints(self.stable_id, endpoints)
     }
+
+    pub(super) fn release_interface(&self, interface: u8) -> AxResult<()> {
+        self.manager
+            .live_release_interface(self.stable_id, self.session_id, interface)
+    }
 }
 
 impl Drop for UsbDeviceLease {
@@ -339,6 +344,7 @@ impl UsbFsManager {
                     open_count: 0,
                     openable: false,
                     synthetic: true,
+                    next_session_id: 1,
                 },
             );
         }
@@ -462,10 +468,13 @@ impl UsbFsManager {
 
         let mut state = self.state.lock();
         let record = state.devices.get_mut(&stable_id).ok_or(AxError::NotFound)?;
+        let session_id = record.next_session_id;
+        record.next_session_id = record.next_session_id.saturating_add(1).max(1);
         record.open_count = record.open_count.saturating_add(1);
         Ok(UsbDeviceLease {
             manager: self.clone(),
             stable_id,
+            session_id,
         })
     }
 
@@ -592,6 +601,7 @@ impl UsbFsManager {
                     open_count: 0,
                     openable,
                     synthetic: false,
+                    next_session_id: 1,
                 });
             record.host_device_id = device_id;
             record.snapshot = snapshot;
@@ -649,6 +659,8 @@ impl UsbFsManager {
                     record.live_device = Some(Arc::new(LiveDeviceState {
                         device: Mutex::new(live_device),
                         endpoints: RwLock::new(BTreeMap::new()),
+                        endpoint_interfaces: RwLock::new(BTreeMap::new()),
+                        interface_owners: Mutex::new(BTreeMap::new()),
                     }));
                     return Ok(());
                 }
@@ -739,6 +751,7 @@ impl UsbFsManager {
         w_index: u16,
         data: &mut [u8],
     ) -> AxResult<usize> {
+        self.live_ensure_configured(stable_id)?;
         let setup = control_setup_from_raw(b_request_type, b_request, w_value, w_index);
         let live_device = self.live_device_by_id(stable_id)?;
         match direction_from_raw(b_request_type) {
@@ -752,21 +765,54 @@ impl UsbFsManager {
     fn live_claim_interface(
         &self,
         stable_id: UsbStableId,
+        session_id: u64,
         interface: u8,
         alternate: u8,
     ) -> AxResult<()> {
         self.live_ensure_configured(stable_id)?;
         let live_device = self.live_device_by_id(stable_id)?;
         {
+            let mut owners = live_device.interface_owners.lock();
+            if let Some(owner) = owners.get(&interface)
+                && *owner != session_id
+            {
+                return Err(AxError::ResourceBusy);
+            }
+            owners.insert(interface, session_id);
+        }
+
+        {
             let mut device = live_device.device.lock();
-            ax_task::future::block_on(device.claim_interface(interface, alternate))
-                .map_err(map_usb_error)?;
-            let endpoints = device.take_endpoints().map_err(map_usb_error)?;
-            let endpoints = endpoints
-                .into_iter()
-                .map(|(address, endpoint)| (address, Arc::new(Mutex::new(endpoint))))
-                .collect();
-            *live_device.endpoints.write() = endpoints;
+            if let Err(err) =
+                ax_task::future::block_on(device.claim_interface(interface, alternate))
+                    .map_err(map_usb_error)
+            {
+                live_device.interface_owners.lock().remove(&interface);
+                return Err(err);
+            }
+            let endpoints = match device.take_endpoints_for_interface(interface) {
+                Ok(endpoints) => endpoints,
+                Err(err) => {
+                    live_device.interface_owners.lock().remove(&interface);
+                    return Err(map_usb_error(err));
+                }
+            };
+            let mut live_endpoints = live_device.endpoints.write();
+            let mut endpoint_interfaces = live_device.endpoint_interfaces.write();
+            let stale_endpoints = endpoint_interfaces
+                .iter()
+                .filter_map(|(address, ep_interface)| {
+                    (*ep_interface == interface).then_some(*address)
+                })
+                .collect::<Vec<_>>();
+            for address in stale_endpoints {
+                endpoint_interfaces.remove(&address);
+                live_endpoints.remove(&address);
+            }
+            for (address, endpoint) in endpoints {
+                endpoint_interfaces.insert(address, interface);
+                live_endpoints.insert(address, Arc::new(Mutex::new(endpoint)));
+            }
         }
         Ok(())
     }
@@ -793,6 +839,8 @@ impl UsbFsManager {
         ax_task::future::block_on(device.set_configuration(configuration))
             .map_err(map_usb_error)?;
         live_device.endpoints.write().clear();
+        live_device.endpoint_interfaces.write().clear();
+        live_device.interface_owners.lock().clear();
         Ok(())
     }
 
@@ -886,13 +934,21 @@ impl UsbFsManager {
         stable_id: UsbStableId,
         request: TransferRequest,
     ) -> AxResult<SubmittedTransfer> {
+        info!("usbfs: live control submit ensure start");
+        self.live_ensure_configured(stable_id)?;
+        info!("usbfs: live control submit ensure done");
         let live_device = self.live_device_by_id(stable_id)?;
+        info!("usbfs: live control submit ep0 start");
         let request_id = live_device
             .device
             .lock()
             .ctrl_ep_mut()
             .submit(request)
             .map_err(map_transfer_error)?;
+        info!(
+            "usbfs: live control submit ep0 queued request={:#x}",
+            request_id.raw()
+        );
         Ok(SubmittedTransfer {
             inner: SubmittedTransferInner::Control {
                 live_device,
@@ -904,8 +960,39 @@ impl UsbFsManager {
     fn live_release_endpoints(&self, stable_id: UsbStableId, endpoints: &[u8]) -> AxResult<()> {
         let live_device = self.live_device_by_id(stable_id)?;
         let mut live_endpoints = live_device.endpoints.write();
+        let mut endpoint_interfaces = live_device.endpoint_interfaces.write();
         for endpoint in endpoints {
             live_endpoints.remove(endpoint);
+            endpoint_interfaces.remove(endpoint);
+        }
+        Ok(())
+    }
+
+    fn live_release_interface(
+        &self,
+        stable_id: UsbStableId,
+        session_id: u64,
+        interface: u8,
+    ) -> AxResult<()> {
+        let live_device = self.live_device_by_id(stable_id)?;
+        {
+            let mut owners = live_device.interface_owners.lock();
+            if owners.get(&interface).copied() == Some(session_id) {
+                owners.remove(&interface);
+            }
+        }
+
+        let stale_endpoints = live_device
+            .endpoint_interfaces
+            .read()
+            .iter()
+            .filter_map(|(address, ep_interface)| (*ep_interface == interface).then_some(*address))
+            .collect::<Vec<_>>();
+        let mut live_endpoints = live_device.endpoints.write();
+        let mut endpoint_interfaces = live_device.endpoint_interfaces.write();
+        for address in stale_endpoints {
+            live_endpoints.remove(&address);
+            endpoint_interfaces.remove(&address);
         }
         Ok(())
     }
@@ -946,37 +1033,17 @@ impl UsbFsManager {
 
     fn release_device(&self, stable_id: UsbStableId) {
         let _open_guard = self.open_lock.lock();
-        let mut refresh = None;
-        {
-            let mut state = self.state.lock();
-            let Some(record) = state.devices.get_mut(&stable_id) else {
-                return;
-            };
-            if record.open_count > 0 {
-                record.open_count -= 1;
-            }
-            if record.open_count != 0 {
-                return;
-            }
-
-            record.live_device = None;
-            if !record.present {
-                state.devices.remove(&stable_id);
-                return;
-            }
-            if record.openable && record.unopened_info.is_none() {
-                refresh = Some((record.host_device_id, record.snapshot.bus_num));
-            }
+        let mut state = self.state.lock();
+        let Some(record) = state.devices.get_mut(&stable_id) else {
+            return;
+        };
+        if record.open_count > 0 {
+            record.open_count -= 1;
         }
-
-        if let Some((host_device_id, bus_num)) = refresh
-            && let Err(err) = self.refresh_host(host_device_id, bus_num)
-        {
-            warn!(
-                "usbfs: failed to refresh bus {} after close: {:?}",
-                bus_num, err
-            );
+        if record.open_count != 0 || record.present {
+            return;
         }
+        state.devices.remove(&stable_id);
     }
 }
 
