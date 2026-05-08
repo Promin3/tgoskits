@@ -124,13 +124,13 @@ impl CowBackend {
         let frame = self.alloc_new_frame(true)?;
 
         if let Some((file, file_vaddr_base, file_start, file_end)) = &self.file {
-            let buf = unsafe {
-                slice::from_raw_parts_mut(phys_to_virt(frame).as_mut_ptr(), self.size as _)
-            };
+            let page_size = usize::from(self.size);
+            let buf =
+                unsafe { slice::from_raw_parts_mut(phys_to_virt(frame).as_mut_ptr(), page_size) };
             // vaddr can be smaller than file_vaddr_base (at most 1 page) due to
             // non-aligned mappings; compute page-internal write offset accordingly.
             let start = file_vaddr_base.as_usize().saturating_sub(vaddr.as_usize());
-            assert!(start < self.size as _);
+            assert!(start < page_size);
 
             let file_read_offset =
                 file_start + vaddr.as_usize().saturating_sub(file_vaddr_base.as_usize()) as u64;

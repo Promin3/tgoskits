@@ -28,6 +28,9 @@ use crate::{
     task::AsThread,
 };
 
+const PROTO_TCP: u32 = IPPROTO_TCP as u32;
+const PROTO_UDP: u32 = IPPROTO_UDP as u32;
+
 pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
     debug!("sys_socket <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
     let ty = raw_ty & 0xFF;
@@ -35,13 +38,13 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
     let pid = current().as_thread().proc_data.proc.pid();
     let socket = match (domain, ty) {
         (AF_INET, SOCK_STREAM) => {
-            if proto != 0 && proto != IPPROTO_TCP as _ {
+            if proto != 0 && proto != PROTO_TCP {
                 return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
             }
             TcpSocket::new().into()
         }
         (AF_INET, SOCK_DGRAM) => {
-            if proto != 0 && proto != IPPROTO_UDP as _ {
+            if proto != 0 && proto != PROTO_UDP {
                 return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
             }
             UdpSocket::new().into()
