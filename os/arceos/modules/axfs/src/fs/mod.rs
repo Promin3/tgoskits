@@ -17,5 +17,8 @@
 /// FAT filesystem implementation
 pub mod fatfs;
 
+/// Ext4 filesystem implementation
+pub mod ext4fs;
+
 pub use ax_fs_devfs as devfs;
 pub use ax_fs_ramfs as ramfs;

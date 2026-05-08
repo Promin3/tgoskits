@@ -22,6 +22,7 @@ ax-fs-vfs = { workspace = true }
 ax-io = { workspace = true, features = ["alloc"] }
 ax-cap-access = { workspace = true }
 ax-lazyinit = { workspace = true }
+ext4plus = { version = "0.1.0-beta.3", default-features = false, features = ["sync", "multi-threaded"] }
 log = { workspace = true }
 spin = { workspace = true }
 

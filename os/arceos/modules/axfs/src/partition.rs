@@ -418,12 +418,14 @@ pub fn create_filesystem_for_partition(
             Ok(Arc::new(fs))
         }
         Some(FilesystemType::Ext4) => {
-            warn!(
-                "ext4 filesystem on partition '{}' is unsupported by legacy ax-fs; use axfs-ng",
+            info!(
+                "Creating EXT4 filesystem for partition '{}'",
                 partition.name
             );
-            drop(disk);
-            Err(AxError::Unsupported)
+            let partition_wrapper =
+                crate::dev::Partition::new(disk, partition.starting_lba, partition.ending_lba);
+            let fs = crate::fs::ext4fs::Ext4FileSystem::from_partition(partition_wrapper)?;
+            Ok(Arc::new(fs))
         }
         Some(FilesystemType::Unknown) | None => {
             warn!("Unknown filesystem type for partition '{}'", partition.name);

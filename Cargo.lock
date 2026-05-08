@@ -873,6 +873,7 @@ dependencies = [
  "ax-io",
  "ax-lazyinit",
  "axfatfs",
+ "ext4plus",
  "log",
  "spin 0.10.0",
 ]
