@@ -29,13 +29,14 @@ struct ReplayTag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplayStatus {
     Complete,
-    Incomplete,
+    IoError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayScan {
     CleanEnd,
-    Incomplete { restart_rel: u32 },
+    IncompleteTail { restart_rel: u32 },
+    IoError { restart_rel: u32 },
     Applied { next_rel: u32, next_seq: u32 },
 }
 
@@ -494,7 +495,7 @@ impl JBD2DEVSYSTEM {
             let record_phys = match ring.phys(record_rel) {
                 Ok(block) => block,
                 Err(_) => {
-                    return ReplayScan::Incomplete {
+                    return ReplayScan::IncompleteTail {
                         restart_rel: start_rel,
                     };
                 }
@@ -505,7 +506,7 @@ impl JBD2DEVSYSTEM {
                     "[JBD2 replay] read record failed at rel_block={record_rel} \
                      phys_block={record_phys} err={e:?}"
                 );
-                return ReplayScan::Incomplete {
+                return ReplayScan::IoError {
                     restart_rel: start_rel,
                 };
             }
@@ -521,7 +522,7 @@ impl JBD2DEVSYSTEM {
                 return if record_rel == start_rel {
                     ReplayScan::CleanEnd
                 } else {
-                    ReplayScan::Incomplete {
+                    ReplayScan::IncompleteTail {
                         restart_rel: start_rel,
                     }
                 };
@@ -532,7 +533,7 @@ impl JBD2DEVSYSTEM {
                     let tags = match self.parse_replay_tags(&record_buf, expect_seq) {
                         Some(tags) if !tags.is_empty() => tags,
                         _ => {
-                            return ReplayScan::Incomplete {
+                            return ReplayScan::IncompleteTail {
                                 restart_rel: start_rel,
                             };
                         }
@@ -543,7 +544,7 @@ impl JBD2DEVSYSTEM {
                         let meta_phys = match ring.phys(record_rel) {
                             Ok(block) => block,
                             Err(_) => {
-                                return ReplayScan::Incomplete {
+                                return ReplayScan::IncompleteTail {
                                     restart_rel: start_rel,
                                 };
                             }
@@ -554,7 +555,7 @@ impl JBD2DEVSYSTEM {
                                 "[JBD2 replay] read meta block failed: idx={idx} \
                                  rel_block={record_rel} phys_block={meta_phys} err={e:?}"
                             );
-                            return ReplayScan::Incomplete {
+                            return ReplayScan::IoError {
                                 restart_rel: start_rel,
                             };
                         }
@@ -589,14 +590,14 @@ impl JBD2DEVSYSTEM {
                                 "[JBD2 replay] write meta block failed: idx={idx} \
                                  phys_block={phys} err={e:?}"
                             );
-                            return ReplayScan::Incomplete {
+                            return ReplayScan::IoError {
                                 restart_rel: start_rel,
                             };
                         }
                     }
                     if let Err(e) = block_dev.flush() {
                         debug!("[JBD2 replay] flush after transaction failed: err={e:?}");
-                        return ReplayScan::Incomplete {
+                        return ReplayScan::IoError {
                             restart_rel: start_rel,
                         };
                     }
@@ -612,7 +613,7 @@ impl JBD2DEVSYSTEM {
                     let blocks = match self.parse_revoke_blocks(&record_buf, expect_seq) {
                         Some(blocks) => blocks,
                         None => {
-                            return ReplayScan::Incomplete {
+                            return ReplayScan::IncompleteTail {
                                 restart_rel: start_rel,
                             };
                         }
@@ -623,7 +624,7 @@ impl JBD2DEVSYSTEM {
                     return if record_rel == start_rel {
                         ReplayScan::CleanEnd
                     } else {
-                        ReplayScan::Incomplete {
+                        ReplayScan::IncompleteTail {
                             restart_rel: start_rel,
                         }
                     };
@@ -647,10 +648,10 @@ impl JBD2DEVSYSTEM {
 
         let maxlen = self.jbd2_super_block.s_maxlen;
         if maxlen == 0 {
-            return ReplayStatus::Incomplete;
+            return ReplayStatus::IoError;
         }
         let Some(ring) = ReplayRing::new(self, journal_blocks) else {
-            return ReplayStatus::Incomplete;
+            return ReplayStatus::IoError;
         };
         let mut expect_seq = self.jbd2_super_block.s_sequence;
 
@@ -677,11 +678,25 @@ impl JBD2DEVSYSTEM {
                     self.jbd2_super_block.s_start = 0;
                     break ReplayStatus::Complete;
                 }
-                ReplayScan::Incomplete { restart_rel } => {
+                ReplayScan::IncompleteTail { restart_rel } => {
+                    debug!(
+                        "[JBD2 replay] dropping incomplete transaction tail at rel_block={}",
+                        restart_rel
+                    );
+                    self.jbd2_super_block.s_start = 0;
+                    self.jbd2_super_block.s_sequence = expect_seq;
+                    self.sequence = expect_seq;
+                    break ReplayStatus::Complete;
+                }
+                ReplayScan::IoError { restart_rel } => {
+                    debug!(
+                        "[JBD2 replay] I/O error while replaying transaction at rel_block={}",
+                        restart_rel
+                    );
                     self.jbd2_super_block.s_start = restart_rel;
                     self.jbd2_super_block.s_sequence = expect_seq;
                     self.sequence = expect_seq;
-                    break ReplayStatus::Incomplete;
+                    break ReplayStatus::IoError;
                 }
             }
         };
@@ -804,4 +819,178 @@ pub fn create_journal_entry<B: BlockDevice>(
         })?;
     info!("Journal inode created!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use core::cell::Cell;
+
+    use super::*;
+
+    struct ReplayTestDevice {
+        data: Vec<u8>,
+        fail_read_block: Option<AbsoluteBN>,
+        now: Cell<i64>,
+    }
+
+    impl ReplayTestDevice {
+        fn new(blocks: usize) -> Self {
+            Self {
+                data: vec![0; blocks * BLOCK_SIZE],
+                fail_read_block: None,
+                now: Cell::new(1_700_000_000),
+            }
+        }
+
+        fn write_block_raw(&mut self, block: AbsoluteBN, data: &[u8; BLOCK_SIZE]) {
+            let start = block.raw() as usize * BLOCK_SIZE;
+            self.data[start..start + BLOCK_SIZE].copy_from_slice(data);
+        }
+
+        fn read_block_raw(&self, block: AbsoluteBN) -> &[u8] {
+            let start = block.raw() as usize * BLOCK_SIZE;
+            &self.data[start..start + BLOCK_SIZE]
+        }
+    }
+
+    impl BlockDevice for ReplayTestDevice {
+        fn write(&mut self, buffer: &[u8], block_id: AbsoluteBN, _count: u32) -> Ext4Result<()> {
+            let start = block_id.as_usize()? * BLOCK_SIZE;
+            let end = start + buffer.len();
+            self.data[start..end].copy_from_slice(buffer);
+            Ok(())
+        }
+
+        fn read(&mut self, buffer: &mut [u8], block_id: AbsoluteBN, _count: u32) -> Ext4Result<()> {
+            if self.fail_read_block == Some(block_id) {
+                return Err(Ext4Error::io());
+            }
+            let start = block_id.as_usize()? * BLOCK_SIZE;
+            let end = start + buffer.len();
+            buffer.copy_from_slice(&self.data[start..end]);
+            Ok(())
+        }
+
+        fn open(&mut self) -> Ext4Result<()> {
+            Ok(())
+        }
+
+        fn close(&mut self) -> Ext4Result<()> {
+            Ok(())
+        }
+
+        fn total_blocks(&self) -> u64 {
+            (self.data.len() / BLOCK_SIZE) as u64
+        }
+
+        fn current_time(&self) -> Ext4Result<Ext4Timestamp> {
+            let sec = self.now.get();
+            self.now.set(sec + 1);
+            Ok(Ext4Timestamp::new(sec, 0))
+        }
+    }
+
+    fn replay_system(start: u32) -> JBD2DEVSYSTEM {
+        let mut j_sb = JournalSuperBllockS {
+            s_maxlen: 8,
+            s_first: 1,
+            s_sequence: 7,
+            s_start: start,
+            ..Default::default()
+        };
+        jbd2_update_superblock_checksum(&mut j_sb);
+
+        JBD2DEVSYSTEM {
+            jbd2_super_block: j_sb,
+            start_block: AbsoluteBN::new(10),
+            max_len: j_sb.s_maxlen,
+            head: 0,
+            sequence: j_sb.s_sequence,
+            commit_queue: Vec::new(),
+        }
+    }
+
+    fn descriptor_block(tid: u32, target: AbsoluteBN) -> [u8; BLOCK_SIZE] {
+        let mut block = [0u8; BLOCK_SIZE];
+        JournalHeaderS {
+            h_magic: JBD2_MAGIC,
+            h_blocktype: JBD2_BLOCKTYPE_DESCRIPTOR,
+            h_sequence: tid,
+        }
+        .to_disk_bytes(&mut block[0..JournalHeaderS::disk_size()]);
+
+        JournalBlockTagS {
+            t_blocknr: target.to_u32().expect("test block fits in u32"),
+            t_checksum: 0,
+            t_flags: JBD2_FLAG_LAST_TAG,
+        }
+        .to_disk_bytes(&mut block[JBD2_DESCRIPTOR_HEADER_SIZE..JBD2_DESCRIPTOR_HEADER_SIZE + 8]);
+
+        block
+    }
+
+    fn commit_block(tid: u32) -> [u8; BLOCK_SIZE] {
+        let mut block = [0u8; BLOCK_SIZE];
+        JournalHeaderS {
+            h_magic: JBD2_MAGIC,
+            h_blocktype: JBD2_BLOCKTYPE_COMMIT,
+            h_sequence: tid,
+        }
+        .to_disk_bytes(&mut block[0..JournalHeaderS::disk_size()]);
+        block
+    }
+
+    #[test]
+    fn replay_drops_incomplete_tail_without_reporting_io_error() {
+        let mut device = ReplayTestDevice::new(32);
+        let mut system = replay_system(1);
+        let target = AbsoluteBN::new(20);
+        let descriptor = descriptor_block(system.sequence, target);
+        let meta = [0x5au8; BLOCK_SIZE];
+
+        device.write_block_raw(AbsoluteBN::new(11), &descriptor);
+        device.write_block_raw(AbsoluteBN::new(12), &meta);
+
+        let status = system.replay_with_mapping(&mut device, &[]);
+
+        assert_eq!(status, ReplayStatus::Complete);
+        assert_eq!(system.jbd2_super_block.s_start, 0);
+        assert_eq!(system.jbd2_super_block.s_sequence, 7);
+        assert_ne!(device.read_block_raw(target), meta);
+    }
+
+    #[test]
+    fn replay_preserves_failure_state_on_real_io_error() {
+        let mut device = ReplayTestDevice::new(32);
+        let mut system = replay_system(1);
+
+        device.fail_read_block = Some(AbsoluteBN::new(11));
+
+        let status = system.replay_with_mapping(&mut device, &[]);
+
+        assert_eq!(status, ReplayStatus::IoError);
+        assert_eq!(system.jbd2_super_block.s_start, 1);
+        assert_eq!(system.jbd2_super_block.s_sequence, 7);
+    }
+
+    #[test]
+    fn replay_applies_complete_committed_transaction() {
+        let mut device = ReplayTestDevice::new(32);
+        let mut system = replay_system(1);
+        let target = AbsoluteBN::new(20);
+        let descriptor = descriptor_block(system.sequence, target);
+        let meta = [0x5au8; BLOCK_SIZE];
+        let commit = commit_block(system.sequence);
+
+        device.write_block_raw(AbsoluteBN::new(11), &descriptor);
+        device.write_block_raw(AbsoluteBN::new(12), &meta);
+        device.write_block_raw(AbsoluteBN::new(13), &commit);
+
+        let status = system.replay_with_mapping(&mut device, &[]);
+
+        assert_eq!(status, ReplayStatus::Complete);
+        assert_eq!(system.jbd2_super_block.s_start, 0);
+        assert_eq!(system.jbd2_super_block.s_sequence, 8);
+        assert_eq!(device.read_block_raw(target), meta);
+    }
 }

@@ -99,7 +99,7 @@ impl<B: BlockDevice> Jbd2Dev<B> {
 
     /// Replays the journal if JBD2 state is available.
     ///
-    /// Returning `Incomplete` here is intentionally conservative: callers that
+    /// Returning `IoError` here is intentionally conservative: callers that
     /// need recovery correctness should abort rather than continue with direct
     /// writes when the filesystem advertises a journal but no journal state was
     /// installed.
@@ -111,7 +111,7 @@ impl<B: BlockDevice> Jbd2Dev<B> {
 
         let Some(jbd_sys) = self.system.as_mut() else {
             error!("journal replay requested before JBD2 state was initialized");
-            return ReplayStatus::Incomplete;
+            return ReplayStatus::IoError;
         };
 
         jbd_sys.replay_with_mapping(self.inner.device_mut(), &self.journal_blocks)

@@ -226,7 +226,7 @@ impl Ext4FileSystem {
                 // Replay after reading the filesystem metadata. Superblock and
                 // descriptor writes are already forced to media to avoid stale
                 // reads during fast recovery.
-                if block_dev.journal_replay_checked() != ReplayStatus::Complete {
+                if block_dev.journal_replay_checked() == ReplayStatus::IoError {
                     return Err(Ext4Error::corrupted());
                 }
 
