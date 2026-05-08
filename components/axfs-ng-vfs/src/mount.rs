@@ -222,6 +222,13 @@ impl Location {
             .map(|entry| self.wrap(entry))
     }
 
+    pub fn symlink(&self, name: &str, target: &str, permission: NodePermission) -> VfsResult<Self> {
+        self.entry
+            .as_dir()?
+            .symlink(name, target, permission)
+            .map(|entry| self.wrap(entry))
+    }
+
     pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
         if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
             return Err(VfsError::CrossesDevices);

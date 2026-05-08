@@ -9,11 +9,10 @@ license.workspace = true
 
 [features]
 fat = ["dep:fatfs"]
-ext4-lwext4 = ["dep:lwext4_rust"]
-ext4-rsext4 = ["dep:rsext4"]
-ext4 = ["ext4-rsext4"]
+ext4-ext4plus = ["dep:ext4plus"]
+ext4 = ["ext4-ext4plus"]
 times = []
-std = ["lwext4_rust?/std"]
+std = []
 
 [dependencies]
 ax-alloc = { workspace = true }
@@ -35,14 +34,11 @@ scope-local = { workspace = true }
 slab = { version = "0.4", default-features = false }
 spin = { workspace = true }
 
-[dependencies.lwext4_rust]
-version = "0.2"
+[dependencies.ext4plus]
+version = "0.1.0-beta.3"
 default-features = false
 optional = true
-
-[dependencies.rsext4]
-workspace = true
-optional = true
+features = ["sync", "multi-threaded"]
 
 [dependencies.fatfs]
 package = "starry-fatfs"

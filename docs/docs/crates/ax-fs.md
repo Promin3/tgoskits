@@ -4,9 +4,9 @@
 > 类型：库 crate
 > 分层：ArceOS 层 / ArceOS 内核模块
 > 版本：`0.3.0-preview.3`
-> 文档依据：`Cargo.toml`、`src/lib.rs`、`src/root.rs`、`src/partition.rs`、`src/dev.rs`、`src/fops.rs`、`src/fs/fatfs.rs`、`src/fs/ext4fs.rs`、`src/mounts.rs`、`os/arceos/modules/axruntime/src/lib.rs`、`os/arceos/api/ax-api/src/imp/fs.rs`、`os/arceos/api/arceos_posix_api/src/imp/fs.rs`
+> 文档依据：`Cargo.toml`、`src/lib.rs`、`src/root.rs`、`src/partition.rs`、`src/dev.rs`、`src/fops.rs`、`src/fs/fatfs.rs`、`src/mounts.rs`、`os/arceos/modules/axruntime/src/lib.rs`、`os/arceos/api/ax-api/src/imp/fs.rs`、`os/arceos/api/arceos_posix_api/src/imp/fs.rs`
 
-`ax-fs` 是当前仓库中“旧文件系统栈”的系统装配器。它本身并不是一个具体文件系统实现，而是把块设备访问、分区扫描、FAT/ext4 适配、`ramfs`/`devfs` 以及根目录挂载树组合在一起，再向 ArceOS 运行时、`ax-api` 和 `ax-posix-api` 暴露一套统一的文件接口。
+`ax-fs` 是当前仓库中“旧文件系统栈”的系统装配器。它本身并不是一个具体文件系统实现，而是把块设备访问、分区扫描、FAT 适配、`ramfs`/`devfs` 以及根目录挂载树组合在一起，再向 ArceOS 运行时、`ax-api` 和 `ax-posix-api` 暴露一套统一的文件接口。ext4 根盘检测仍保留，但旧栈不再挂载 ext4；ext4 主线支持迁移到 `ax-fs-ng`。
 
 ## 1. 架构设计分析
 ### 1.1 设计定位
@@ -21,10 +21,9 @@
 ### 1.2 内部模块划分
 - `src/lib.rs`：初始化主入口。负责选择块设备、解析 `root=`、触发 GPT 扫描与根文件系统初始化。
 - `src/dev.rs`：把 `AxBlockDevice` 包装成带游标的 `Disk`，再切出 `Partition` 视图。整个旧栈默认以 512B block 为基本访问粒度。
-- `src/partition.rs`：解析 GPT 分区表，检测 FAT/ext4 魔数，提取 `UUID`/`PARTUUID`，并根据检测结果创建具体文件系统实例。
+- `src/partition.rs`：解析 GPT 分区表，检测 FAT/ext4 魔数，提取 `UUID`/`PARTUUID`，并根据检测结果创建具体文件系统实例；旧栈检测到 ext4 时返回 `Unsupported`。
 - `src/root.rs`：定义 `RootDirectory`、挂载点表、全局当前目录，以及 `lookup`/`create`/`remove`/`rename` 等根级路径路由逻辑。
 - `src/fs/fatfs.rs`：把 `axfatfs` 适配为 `ax_fs_vfs::VfsOps`/`VfsNodeOps`。
-- `src/fs/ext4fs.rs`：把 `rsext4` 适配为 `ax_fs_vfs::VfsOps`/`VfsNodeOps`。
 - `src/fs/mod.rs`：暴露旧栈下的具体文件系统实现，并直接复用 `axfs_devfs`、`axfs_ramfs`。
 - `src/mounts.rs`：创建基于 `ramfs` 的 `/proc`、`/sys` 伪目录树。
 - `src/fops.rs`：定义 `File`、`Directory`、`OpenOptions`，并使用 `ax_cap_access::WithCap` 在打开后绑定读写执行能力。
@@ -55,7 +54,7 @@ flowchart TD
 4. `/proc` 与 `/sys` 不是独立的动态内核文件系统，而是启动时填充好的 `ramfs` 树。
 
 ### 1.4 与相邻 crate 的边界
-- `ax-fs` 是聚合层，不是叶子文件系统。真正的叶子实现是 `axfs_ramfs`、`axfs_devfs`、`axfatfs` 适配层以及 `rsext4` 适配层。
+- `ax-fs` 是聚合层，不是叶子文件系统。真正的叶子实现是 `axfs_ramfs`、`axfs_devfs` 以及 `axfatfs` 适配层。
 - `ax-fs` 自己维护挂载点表和根目录拼接逻辑；`axfs_vfs` 并不提供挂载图管理能力。
 - `ax-fs` 的当前工作目录是 `ROOT_DIR`/`CURRENT_DIR` 这组全局静态对象，而不是任务局部对象。这一点与 `ax-fs-ng` 的 `FS_CONTEXT` 有本质差异。
 - `root.rs` 顶部已经明确写出 TODO：当挂载点存在包含关系时，这套路由逻辑并不“工作得很好”。因此它更适合简单的根目录拼装，而不是复杂命名空间系统。
@@ -77,7 +76,7 @@ flowchart TD
 
 #### ext4/FAT 接入方式
 - FAT 路径通过 `PartitionWrapper` 把分区包装成 `axfatfs` 所需的 `Read`/`Write`/`Seek` 设备，再适配到 `VfsNodeOps`。
-- ext4 路径通过 `Jbd2Dev<Disk|Partition>` 挂载 `rsext4`，由 `Ext4FileSystem{,Partition}` 包装成旧 `VfsOps`。
+- ext4 魔数与 UUID 读取仍用于分区识别，但旧 `ax-fs` 不再提供 ext4 后端；需要 ext4 时应走 `ax-fs-ng`。
 
 #### 伪文件系统内容
 `mounts.rs` 当前仅创建了少量兼容性节点，例如：
@@ -104,7 +103,6 @@ graph LR
     axfs_ramfs["ax-fs-ramfs"] --> current
     axfs_devfs["ax-fs-devfs"] --> current
     axfatfs["axfatfs"] --> current
-    rsext4["rsext4"] --> current
     ax_cap_access["ax-cap-access"] --> current
 
     current --> ax-runtime["ax-runtime(fs)"]
@@ -116,7 +114,7 @@ graph LR
 - `ax-driver`：提供块设备来源。
 - `axfs_vfs`：旧栈统一 trait 契约。
 - `axfs_ramfs`、`axfs_devfs`：旧栈中的内存文件系统与设备文件系统。
-- `axfatfs`、`rsext4`：分别承担 FAT 与 ext4 的实际格式实现。
+- `axfatfs`：承担 FAT 的实际格式实现。
 - `ax-cap-access`：为 `fops` 提供打开后能力控制。
 
 ### 3.2 关键直接消费者
@@ -126,7 +124,6 @@ graph LR
 
 ### 3.3 与相邻 crate 的关系
 - `axfs_ramfs`/`axfs_devfs` 位于 `ax-fs` 之下，是旧栈的具体文件系统实现。
-- `rsext4` 比 `ax-fs` 更靠下，只负责 ext4 语义，不负责根目录、当前目录或挂载树。
 - `ax-fs-ng` 与 `ax-fs` 不是简单的“新旧版本号关系”，而是两套边界不同的文件系统栈。
 
 ## 4. 开发指南
@@ -141,7 +138,7 @@ ax-fs = { workspace = true }
 ### 4.2 改动约束
 1. 任何对 `init_filesystems()`、`parse_root_spec()`、`find_root_partition()` 的修改，都应被视为启动路径变更。
 2. 任何对 `RootDirectory` 路由逻辑的修改，都必须同时验证 `lookup`、`read_dir`、`remove_dir` 与 `rename` 的挂载边界行为。
-3. 任何对 `ext4fs.rs`/`fatfs.rs` 的修改，都要同步考虑旧 `axfs_vfs` trait 语义，而不是只看底层库自身接口。
+3. 任何对 `fatfs.rs` 的修改，都要同步考虑旧 `axfs_vfs` trait 语义，而不是只看底层库自身接口。
 4. 如果要增加新的伪文件系统节点，请明确它是“静态兼容性文件”还是“真正会动态更新的接口”，不要混淆两者。
 
 ### 4.3 扩展建议
@@ -161,7 +158,7 @@ ax-fs = { workspace = true }
 
 ### 5.3 建议的集成测试
 - FAT 根盘启动。
-- ext4 根盘启动。
+- ext4 根盘应由 `ax-fs-ng` 路径验证；旧 `ax-fs` 检测到 ext4 时应明确返回不支持。
 - 没有可识别文件系统时回退到 `ramfs`。
 - `/proc`、`/sys` 兼容节点能被上层正常读取。
 - `ax-api` 与 `ax-posix-api` 中的打开、读写、`stat`、`rename` 仍保持兼容。
@@ -170,7 +167,7 @@ ax-fs = { workspace = true }
 - 根目录挂载点存在包含关系时的路径解析。
 - 跨挂载点 `rename`/`remove_dir`。
 - `UUID`/`PARTUUID` 匹配大小写与格式兼容性。
-- ext4 适配层与 `rsext4` 的 block size 换算。
+- ext4 分区检测与旧栈 unsupported 回退路径。
 
 ## 6. 跨项目定位分析
 ### 6.1 ArceOS

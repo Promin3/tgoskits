@@ -316,9 +316,7 @@ impl FsContext {
         if dir.lookup_no_follow(name).is_ok() {
             return Err(VfsError::AlreadyExists);
         }
-        let symlink = dir.create(name, NodeType::Symlink, NodePermission::default())?;
-        symlink.entry().as_file()?.set_symlink(target.as_ref())?;
-        Ok(symlink)
+        dir.symlink(name, target.as_ref(), NodePermission::default())
     }
 
     /// Returns the canonical, absolute form of a path.

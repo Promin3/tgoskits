@@ -39,7 +39,7 @@ tgoskits/
 │   ├── starry-signal/          # StarryOS 信号机制
 │   ├── arm_vcpu / riscv_vcpu / x86_vcpu/  # 架构相关 vCPU 实现
 │   ├── arm_vgic / x86_vlapic / riscv_vplic/  # 架构相关中断控制器虚拟化
-│   ├── axfs-ng-vfs / rsext4/  # 文件系统层
+│   ├── axfs-ng-vfs / ax-fs-ng/  # 文件系统层
 │   ├── starry-smoltcp/         # 网络协议栈（smoltcp fork）
 │   └── ...                     # 同步原语、错误码、CPU 抽象等基础设施
 ├── os/

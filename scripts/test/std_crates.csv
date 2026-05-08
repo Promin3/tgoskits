@@ -31,7 +31,6 @@ range-alloc-arceos
 riscv-h
 ax-riscv-plic
 riscv_vplic
-rsext4
 scope-local
 starry-process
 starry-signal

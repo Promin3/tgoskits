@@ -67,6 +67,13 @@ pub trait DirNodeOps: NodeOps {
         permission: NodePermission,
     ) -> VfsResult<DirEntry>;
 
+    /// Creates a symbolic link.
+    fn symlink(&self, name: &str, target: &str, permission: NodePermission) -> VfsResult<DirEntry> {
+        let entry = self.create(name, NodeType::Symlink, permission)?;
+        entry.as_file()?.set_symlink(target)?;
+        Ok(entry)
+    }
+
     /// Creates a link to a node.
     fn link(&self, name: &str, node: &DirEntry) -> VfsResult<DirEntry>;
 
@@ -282,6 +289,20 @@ impl DirNode {
     ) -> VfsResult<DirEntry> {
         verify_entry_name(name)?;
         self.create_locked(name, node_type, permission, &mut self.cache.lock())
+    }
+
+    /// Creates a symbolic link.
+    pub fn symlink(
+        &self,
+        name: &str,
+        target: &str,
+        permission: NodePermission,
+    ) -> VfsResult<DirEntry> {
+        verify_entry_name(name)?;
+        let mut children = self.cache.lock();
+        let entry = self.ops.symlink(name, target, permission)?;
+        children.insert(name.to_owned(), entry.clone());
+        Ok(entry)
     }
 
     fn lock_both_cache<'a>(

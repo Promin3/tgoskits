@@ -99,7 +99,6 @@ members = [
     "components/riscv_plic",
     "components/riscv_vcpu",
     "components/riscv_vplic",
-    "components/rsext4",
     "components/scope-local",
     "components/starry-process",
     "components/starry-signal",
@@ -315,7 +314,6 @@ rockchip-npu = { version = "0.1.1", path = "drivers/npu/rockchip-npu" }
 realtek-rtl8125 = { version = "0.1.0", path = "drivers/net/realtek-rtl8125" }
 rockchip-pm = { version = "0.4.2", path = "drivers/soc/rockchip/rockchip-pm" }
 rockchip-soc = { version = "0.1.1", path = "drivers/soc/rockchip/rockchip-soc" }
-rsext4 = { version = "0.3.7", path = "components/rsext4" }
 scope-local = { version = "0.3.6", path = "components/scope-local" }
 simple-sdmmc = { version = "0.1", path = "drivers/blk/simple-sdmmc" }
 smoltcp = { version = "0.13.0", default-features = false }

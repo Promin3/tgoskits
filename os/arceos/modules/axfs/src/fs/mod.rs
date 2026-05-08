@@ -14,8 +14,6 @@
 
 //! Filesystem implementations
 
-/// Ext4 filesystem implementation
-pub mod ext4fs;
 /// FAT filesystem implementation
 pub mod fatfs;
 

@@ -101,7 +101,7 @@ graph LR
 - `intrusive-collections`
 - `log`
 - `lru`
-- `lwext4_rust`
+- `ext4plus`
 - `slab`
 - `spin`
 - `starry-fatfs`
