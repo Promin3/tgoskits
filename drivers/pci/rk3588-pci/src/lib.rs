@@ -100,6 +100,8 @@ pub struct HostConfig {
     pub cfg_size: usize,
     pub bus_base: u8,
     pub logical_bus_end: u8,
+    /// The platform glue decides the iATU register layout after SoC bring-up.
+    pub iatu_mode: IatuMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,12 +157,6 @@ impl Rk3588PcieHost {
         cfg: MmioRaw,
         config: HostConfig,
     ) -> Result<Self, Error> {
-        let iatu_mode = if read32(&dbi, PCIE_ATU_VIEWPORT) == u32::MAX {
-            IatuMode::Unroll
-        } else {
-            IatuMode::Viewport
-        };
-
         Ok(Self {
             apb,
             dbi,
@@ -171,7 +167,7 @@ impl Rk3588PcieHost {
             bus_base: config.bus_base,
             logical_bus_end: config.logical_bus_end,
             cfg_bus_delta: i16::from(config.bus_base),
-            iatu_mode,
+            iatu_mode: config.iatu_mode,
         })
     }
 
@@ -180,9 +176,7 @@ impl Rk3588PcieHost {
         delay: &dyn Delay,
         mut reset: Option<&mut dyn ResetControl>,
     ) -> LinkReport {
-        self.enable_dbi_ro_writes();
-        self.force_root_complex_mode();
-        self.program_root_bridge_defaults();
+        self.prepare_root_complex_config();
 
         let firmware_trained = self.link_up();
         if firmware_trained {
@@ -321,10 +315,16 @@ impl Rk3588PcieHost {
         }
     }
 
+    fn prepare_root_complex_config(&self) {
+        self.force_root_complex_mode();
+        // The RC mode switch may reset DBI-side state, so unlock DBI writes
+        // only after the controller mode is fixed.
+        self.enable_dbi_ro_writes();
+        self.program_root_bridge_defaults();
+    }
+
     fn enable_dbi_ro_writes(&self) {
-        update32(&self.dbi, PCIE_MISC_CONTROL_1_OFF, |value| {
-            value | PCIE_DBI_RO_WR_EN
-        });
+        write32(&self.dbi, PCIE_MISC_CONTROL_1_OFF, PCIE_DBI_RO_WR_EN);
     }
 
     fn force_root_complex_mode(&self) {
